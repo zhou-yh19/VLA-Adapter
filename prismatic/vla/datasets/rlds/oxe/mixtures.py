@@ -226,5 +226,10 @@ OXE_NAMED_MIXTURES: Dict[str, List[Tuple[str, float]]] = {
     "aloha1_put_X_into_pot_300_demos": [
         ("aloha1_put_X_into_pot_300_demos", 1.0),
     ],
+
+    # === Teleavatar Fine-Tuning Datasets ===
+    "right_grip_grab_a_stuffed_animal_into_left_box": [
+        ("right_grip_grab_a_stuffed_animal_into_left_box", 1.0),
+    ],
 # fmt: on
 }

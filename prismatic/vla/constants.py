@@ -53,6 +53,12 @@ BRIDGE_CONSTANTS = {
     "ACTION_PROPRIO_NORMALIZATION_TYPE": NormalizationType.BOUNDS_Q99,
 }
 
+TELEAVATAR_CONSTANTS = {
+    "NUM_ACTIONS_CHUNK": 30, # 与openpi中设定的action_horizon一致
+    "ACTION_DIM": 16, # Left arm positions(7) + Left gripper effort(1) + Right arm positions(7) + Right gripper effort(1)
+    "PROPRIO_DIM": 14, # Left arm positions (indices 0-6) + Right arm positions (indices 8-14)
+    "ACTION_PROPRIO_NORMALIZATION_TYPE": NormalizationType.BOUNDS_Q99,
+}
 
 # Function to detect robot platform from command line arguments
 def detect_robot_platform():
@@ -66,6 +72,8 @@ def detect_robot_platform():
         return "BRIDGE"
     elif "calvin" in cmd_args:
         return "CALVIN"
+    elif "teleavatar" in cmd_args:
+        return "TELEAVATAR"
     else:
         # Default to LIBERO if unclear
         return "LIBERO"
@@ -83,6 +91,8 @@ elif ROBOT_PLATFORM == "BRIDGE":
     constants = BRIDGE_CONSTANTS
 elif ROBOT_PLATFORM == "CALVIN":
     constants = CALVIN_CONSTANTS
+elif ROBOT_PLATFORM == "TELEAVATAR":
+    constants = TELEAVATAR_CONSTANTS
 
 # Assign constants to global variables
 NUM_ACTIONS_CHUNK = constants["NUM_ACTIONS_CHUNK"]

@@ -265,6 +265,8 @@ def get_dataset_statistics(
 def save_dataset_statistics(dataset_statistics, run_dir):
     """Saves a `dataset_statistics.json` file."""
     out_path = run_dir / "dataset_statistics.json"
+    
+    run_dir.mkdir(parents=True, exist_ok=True)
     with open(out_path, "w") as f_json:
         for _, stats in dataset_statistics.items():
             for k in stats["action"].keys():

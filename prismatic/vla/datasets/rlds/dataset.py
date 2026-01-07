@@ -487,6 +487,15 @@ def make_interleaved_dataset(
         traj_read_threads: total number of parallel read workers for trajectory transforms, distributed across
             datasets according to their sampling weights. If None, defaults to AUTOTUNE for every dataset.
     """
+    # Check if dataset list is empty
+    if not dataset_kwargs_list:
+        raise ValueError(
+            "Cannot create interleaved dataset: `dataset_kwargs_list` is empty. "
+            "This usually means all datasets were skipped due to missing requirements "
+            "(e.g., missing camera views, invalid configurations, etc.). "
+            "Please check your dataset configuration and ensure at least one dataset can be loaded."
+        )
+
     # Default to uniform sampling (if `sample_weights` is not specified)
     if not sample_weights:
         sample_weights = [1.0] * len(dataset_kwargs_list)
@@ -519,6 +528,10 @@ def make_interleaved_dataset(
 
     # Effective Dataset Length = Number of samples until each dataset has completed at least one epoch
     #   =>> Note :: Only counting the "primary" datasets (i.e., datasets with sample_weight == 1.0)
+    if len(primary_dataset_indices) == 0:
+        # If no primary datasets (all weights != 1.0), use all datasets
+        primary_dataset_indices = np.arange(len(dataset_sizes))
+    
     dataset_len = int((np.array(dataset_sizes) / sample_weights)[primary_dataset_indices].max())
 
     # Allocate Threads based on Weights

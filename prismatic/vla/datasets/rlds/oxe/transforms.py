@@ -874,6 +874,34 @@ def aloha_dataset_transform(trajectory: Dict[str, Any]) -> Dict[str, Any]:
     return trajectory
 
 
+
+def teleavatar_dataset_transform(trajectory: Dict[str, Any]) -> Dict[str, Any]:
+    # teleavatar action
+    action_data = trajectory["action"]
+    selected_action_data = tf.concat(
+        [
+            action_data[:, 0:7],    # Left arm positions
+            action_data[:, 39:40],  # Left gripper effort (index 39 = 32+7)
+            action_data[:, 8:15],   # Right arm positions
+            action_data[:, 47:48],  # Right gripper effort (index 47 = 32+15)
+        ],
+        axis=1,
+    )
+    trajectory["action"] = selected_action_data
+
+    # teleavatar state
+    state_data = trajectory["observation"]["state"]
+    selected_state_data = tf.concat(
+        [
+            state_data[:, 0:7],   # Left arm positions (indices 0-6)
+            state_data[:, 8:15],  # Right arm positions (indices 8-14)
+        ],
+        axis=1,
+    )
+    trajectory["observation"]["state"] = selected_state_data
+
+    return trajectory
+
 # === Registry ===
 OXE_STANDARDIZATION_TRANSFORMS = {
     "bridge_oxe": bridge_oxe_dataset_transform,
@@ -960,4 +988,6 @@ OXE_STANDARDIZATION_TRANSFORMS = {
     "aloha1_fold_shirt_30_demos": aloha_dataset_transform,
     "aloha1_scoop_X_into_bowl_45_demos": aloha_dataset_transform,
     "aloha1_put_X_into_pot_300_demos": aloha_dataset_transform,
+    ### teleavatar fine-tuning datasets
+    "right_grip_grab_a_stuffed_animal_into_left_box": teleavatar_dataset_transform,
 }
