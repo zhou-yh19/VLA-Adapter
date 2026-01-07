@@ -2,6 +2,7 @@
 __pycache__/
 *.py[cod]
 *$py.class
+*.pyc
 
 # C extensions
 *.so
@@ -147,6 +148,9 @@ dmypy.json
 # Caches and Datasets
 cache/
 data/
+outputs/
+logs/
+pretrained_models/
 
 # Rollout videos and wandb logs
 rollouts/
