@@ -728,7 +728,7 @@ def finetune(cfg: FinetuneConfig) -> None:
 
     # Initialize wandb logging
     if distributed_state.is_main_process:
-        wandb.init(project=cfg.wandb_project, name=f"ft+{run_id}", mode="online")
+        wandb.init(project=cfg.wandb_project, name=f"ft+{run_id}", mode="offline")
 
     # Print detected constants
     print(

@@ -155,3 +155,4 @@ pretrained_models/
 # Rollout videos and wandb logs
 rollouts/
 wandb/
+data

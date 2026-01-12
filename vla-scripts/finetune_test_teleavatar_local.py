@@ -58,7 +58,7 @@ from prismatic.vla.datasets import RLDSDataset, RLDSBatchTransform
 from prismatic.vla.datasets.rlds.utils.data_utils import save_dataset_statistics
 from prismatic.models import load, load_vla
 
-
+import psutil
 
 # Sane Defaults
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -75,7 +75,7 @@ class FinetuneConfig:
     data_root_dir: Path = Path("data/shihaoran")      # Directory containing RLDS datasets
     dataset_name: str = "right_grip_grab_a_stuffed_animal_into_left_box"    # Name of fine-tuning dataset (e.g., `aloha_scoop_x_into_bowl`)
     run_root_dir: Path = Path("outputs")                # Path to directory to store logs & checkpoints
-    shuffle_buffer_size: int = 100               # Dataloader shuffle buffer size (can reduce if OOM errors occur)
+    shuffle_buffer_size: int = 128               # Dataloader shuffle buffer size (can reduce if OOM errors occur)
 
     # Algorithm and architecture
     use_l1_regression: bool = True                   # If True, trains continuous action head with L1 regression objective
@@ -87,16 +87,16 @@ class FinetuneConfig:
     phase1_path: str = "None"
 
     # Training configuration
-    batch_size: int = 1                              # Batch size per device (total batch size = batch_size * num GPUs)
+    batch_size: int = 2                              # Batch size per device (total batch size = batch_size * num GPUs)
     learning_rate: float = 2e-4                      # Learning rate
     lr_warmup_steps: int = 0.1                       # Number of steps to warm up learning rate (from 10% to 100%)
     num_steps_before_decay: int = 200000             # Number of steps before LR decays by 10x
-    grad_accumulation_steps: int = 16                 # Number of gradient accumulation steps
-    max_steps: int = 2000                          # Max number of training steps
+    grad_accumulation_steps: int = 8                 # Number of gradient accumulation steps
+    max_steps: int = 20000                          # Max number of training steps
     use_val_set: bool = False                        # If True, uses validation set and log validation metrics
     val_freq: int = 10_000                           # (When `use_val_set==True`) Validation set logging frequency in steps
     val_time_limit: int = 180                        # (When `use_val_set==True`) Time limit for computing validation metrics
-    save_freq: int = 500                          # Checkpoint saving frequency in steps
+    save_freq: int = 5000                          # Checkpoint saving frequency in steps
     save_latest_checkpoint_only: bool = False        # If True, saves only 1 checkpoint, overwriting latest checkpoint
                                                      #   (If False, saves all checkpoints)
     resume: bool = False                             # If True, resumes from checkpoint
@@ -108,7 +108,7 @@ class FinetuneConfig:
     use_lora: bool = True                          # If True, uses LoRA fine-tuning
     lora_rank: int = 64                              # Rank of LoRA weight matrix
     lora_dropout: float = 0.0                        # Dropout applied to LoRA weights
-    merge_lora_during_training: bool = True         # If True, merges LoRA weights and saves result during training
+    merge_lora_during_training: bool = False         # If True, merges LoRA weights and saves result during training
                                                      #   Note: Merging can be very slow on some machines. If so, set to
                                                      #         False and merge final checkpoint offline!
 
@@ -127,6 +127,23 @@ class FinetuneConfig:
     phase: str = "Training"
     # fmt: on
 
+
+def get_process_tree_memory():
+    """获取当前进程及所有子进程的内存使用"""
+    current_process = psutil.Process(os.getpid())
+    
+    # 获取当前进程内存
+    total_memory = current_process.memory_info().rss
+    
+    # 递归获取所有子进程的内存
+    children = current_process.children(recursive=True)
+    for child in children:
+        try:
+            total_memory += child.memory_info().rss
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+    
+    return total_memory / 1024**2  # 转换为MB
 
 
 def remove_ddp_in_checkpoint(state_dict) -> dict:
@@ -407,6 +424,11 @@ def run_forward_pass(
             all_hidden_states = torch.cat((task_latten_states, actions_hidden_states),2)
             multi_layer_hidden_states.append(all_hidden_states)
         multi_layer_hidden_states = torch.cat(multi_layer_hidden_states, dim = 1)
+        
+        # Clear reference to output.hidden_states to free memory (after extracting what we need)
+        # Note: This helps free memory but doesn't break gradients since multi_layer_hidden_states
+        # already contains the necessary computational graph connections
+        del output.hidden_states
 
         predicted_actions = action_head.module.predict_action(
             multi_layer_hidden_states,
@@ -416,6 +438,9 @@ def run_forward_pass(
             )
 
         loss = torch.nn.L1Loss()(predicted_actions, ground_truth_actions)
+        
+        # Clear intermediate variables to free memory
+        del multi_layer_hidden_states
 
         metrics.update(
             {
@@ -581,7 +606,12 @@ def save_training_checkpoint(
             config = AutoConfig.from_pretrained("pretrained_models/configs/config.json")
             base_vla = AutoModelForVision2Seq.from_config(config, torch_dtype=torch.bfloat16)  # Create a new model with configuration, the parameters are randomly initialized
             # print(new_state_dict['action_queries.weight'])
-            new_state_dict['action_queries.weight'] = vla.state_dict()['module.base_model.model.action_queries.weight'].cpu()
+
+            # Only get the specific weight we need instead of entire state_dict
+            action_queries_weight = vla.state_dict()['module.base_model.model.action_queries.weight'].cpu()
+            new_state_dict['action_queries.weight'] = action_queries_weight
+            del action_queries_weight  # Free memory immediately
+
             missing_keys, unexpected_keys = base_vla.load_state_dict(new_state_dict, strict=False)
             
         else:
@@ -596,6 +626,11 @@ def save_training_checkpoint(
         if distributed_state.is_main_process:
             merged_vla.save_pretrained(checkpoint_dir)
             print(f"Saved merged model for Step {log_step} at: {checkpoint_dir}")
+        
+        # Explicitly delete models to free memory
+        del base_vla
+        del merged_vla
+        torch.cuda.empty_cache()  # Clear GPU cache after model deletion
         
         # Wait for merged model to be saved
         dist.barrier()
@@ -1017,6 +1052,7 @@ def finetune(cfg: FinetuneConfig) -> None:
         vla.train()
         optimizer.zero_grad()
         for batch_idx, batch in enumerate(dataloader):
+            print(f"Before Forward Pass: {get_process_tree_memory():.3f} MB")
             # Compute training metrics and loss
             compute_diffusion_l1 = (cfg.use_l1_regression and batch_idx % cfg.diffusion_sample_freq == 0) or (cfg.use_diffusion and batch_idx % cfg.diffusion_sample_freq == 0)
             loss, metrics = run_forward_pass(
@@ -1034,6 +1070,7 @@ def finetune(cfg: FinetuneConfig) -> None:
                 use_pro_version=cfg.use_pro_version,
                 cfg=cfg,
             )
+            print(f"After Forward Pass: {get_process_tree_memory():.3f} MB")
 
             # Normalize loss to account for gradient accumulation
             normalized_loss = loss / cfg.grad_accumulation_steps
@@ -1075,11 +1112,18 @@ def finetune(cfg: FinetuneConfig) -> None:
                 )
 
             # Optimizer and LR scheduler step
+            print(f"Before Optimizer: {get_process_tree_memory():.3f} MB")
             if (batch_idx + 1) % cfg.grad_accumulation_steps == 0:
                 optimizer.step()
                 scheduler.step()
                 optimizer.zero_grad()
                 progress.update()
+                
+                # Periodically clear GPU cache to prevent memory accumulation
+                del loss
+                del normalized_loss
+                torch.cuda.empty_cache()
+            print(f"After Optimizer: {get_process_tree_memory():.3f} MB")
 
             # Save model checkpoint: either keep latest checkpoint only or all checkpoints
             if gradient_step_idx > 0 and log_step % cfg.save_freq == 0:
