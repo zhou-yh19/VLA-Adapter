@@ -6,6 +6,7 @@ Handles subscribing to sensor topics and publishing actions.
 
 import logging
 import time
+import threading
 from threading import Lock
 from typing import Dict, Optional
 
@@ -274,3 +275,137 @@ class TeleavatarROS2Interface(Node):
         right_gripper_msg.velocity = [0.0]
         right_gripper_msg.effort = [float(actions[15])]
         self.action_publishers['right_gripper'].publish(right_gripper_msg)
+
+
+
+class TeleavatarRobotInterface():
+    """Environment for Teleavatar dual-arm robot."""
+
+    def __init__(self):
+        """Initialize Teleavatar environment.
+
+        Args:
+            prompt: Default language instruction for the policy
+
+        Note: Images are NOT resized here - they are kept at original resolution
+        to match training data format (480×848 for stereo, 1080×1920 for head).
+        """
+
+        # Initialize ROS2 interface in a separate thread
+        self._ros_interface: Optional[TeleavatarROS2Interface] = None
+        self._ros_thread: Optional[threading.Thread] = None
+        self._init_ros2()
+
+
+    def _init_ros2(self):
+        """Initialize ROS2 in a background thread and wait for initial sensor data."""
+
+        # Event to signal when executor starts spinning
+        spin_started = threading.Event()
+
+        def ros_spin():
+            rclpy.init()
+            self._ros_interface = TeleavatarROS2Interface()
+
+            # Spin in background
+            executor = rclpy.executors.MultiThreadedExecutor()
+            executor.add_node(self._ros_interface)
+
+            # Signal that spinning is about to start
+            spin_started.set()
+
+            try:
+                executor.spin()
+            finally:
+                executor.shutdown()
+                self._ros_interface.destroy_node()
+                rclpy.shutdown()
+
+        self._ros_thread = threading.Thread(target=ros_spin, daemon=True)
+        self._ros_thread.start()
+
+        # Wait for ROS2 interface object to be created
+        timeout = 10.0
+        start_time = time.time()
+        while self._ros_interface is None and time.time() - start_time < timeout:
+            time.sleep(0.1)
+
+        if self._ros_interface is None:
+            raise RuntimeError("Failed to initialize ROS2 interface object within timeout")
+
+        logging.info("ROS2 interface object created, waiting for executor to start spinning...")
+
+        # Wait for executor to start spinning
+        if not spin_started.wait(timeout=5.0):
+            raise RuntimeError("ROS2 executor failed to start spinning")
+
+        logging.info("ROS2 executor started, waiting for initial sensor data...")
+
+        # Now wait for initial sensor data (callbacks can now be triggered)
+        if not self._ros_interface.wait_for_initial_data(timeout=30.0):
+            raise RuntimeError(
+                "Failed to receive initial sensor data. "
+                "Please check that ROS2 topics are publishing:\n"
+                "  ros2 topic list\n"
+                "  ros2 topic hz /left/color/image_raw\n"
+                "  ros2 topic echo /left_arm/joint_states --once"
+            )
+
+        logging.info("ROS2 interface initialized successfully with sensor data")
+
+
+    def get_observation(self) -> dict:
+        """Get current observation from robot sensors.
+
+        Returns:
+            Dictionary with keys:
+                - 'state': 48-dim proprioceptive state
+                - 'images': Dict of camera images in (H, W, C) format at ORIGINAL resolution
+                - 'prompt': Language instruction
+
+        Note: Images are kept at original resolution to match training data:
+            - left_color, right_color: 480×848×3 (H,W,C)
+            - head_camera: 1080×1920×3 (H,W,C)
+        The policy's _parse_image will handle any format conversion if needed.
+        """
+        if self._ros_interface is None:
+            raise RuntimeError("ROS2 interface not initialized")
+
+        # Get raw observation from ROS2
+        obs = self._ros_interface.get_observation()
+        if obs is None:
+            raise RuntimeError("Failed to get observation from ROS2 interface")
+
+        # Process images: keep original resolution AND keep (H, W, C) format
+        # Policy's _parse_image will handle format conversion if needed
+        # Return with the exact keys expected by teleavatar_policy.py
+        return obs
+
+
+    def apply_action(self, action: np.ndarray) -> None:
+        """Apply action to the robot.
+
+        Args:
+            action: Dictionary containing 'actions' key with 16-dim action array
+        """
+        if self._ros_interface is None:
+            raise RuntimeError("ROS2 interface not initialized")
+
+        if 'actions' not in action:
+            raise ValueError(f"Action dict must contain 'actions' key, got: {action.keys()}")
+
+        actions = action['actions']
+        if not isinstance(actions, np.ndarray):
+            actions = np.array(actions, dtype=np.float32)
+
+        # Ensure correct shape
+        if actions.shape != (16,):
+            raise ValueError(f"Expected 16-dim action, got shape {actions.shape}")
+
+        # Publish to ROS2
+        self._ros_interface.publish_action(actions)
+
+    def __del__(self):
+        """Cleanup when environment is destroyed."""
+        if self._ros_thread is not None and self._ros_thread.is_alive():
+            logging.info("Shutting down ROS2 thread...")

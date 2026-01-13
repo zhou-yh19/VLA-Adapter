@@ -5,7 +5,7 @@ import os
 import numpy as np
 import tensorflow as tf
 
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional, Tuple, Union
 import threading
 import logging
 
@@ -95,52 +95,3 @@ def denormalize_action_for_teleavatar(
     
     return denormalized_action
 
-
-##########################################################################################
-# ROS2 Interface Utils
-##########################################################################################
-
-def init_ros2(self):
-    """Initialize ROS2 in a background thread for action publishing."""
-    import time
-
-    # Event to signal when executor starts spinning
-    spin_started = threading.Event()
-
-    def ros_spin():
-        rclpy.init()
-        self._ros_node = rclpy.create_node('teleavatar_dataset_action_publisher')
-
-        # Spin in background
-        executor = rclpy.executors.MultiThreadedExecutor()
-        executor.add_node(self._ros_node)
-
-        # Signal that spinning is about to start
-        spin_started.set()
-
-        try:
-            executor.spin()
-        finally:
-            executor.shutdown()
-            self._ros_node.destroy_node()
-            rclpy.shutdown()
-
-    ros_thread = threading.Thread(target=ros_spin, daemon=True)
-    ros_thread.start()
-
-    # Wait for ROS2 node to be created
-    timeout = 10.0
-    start_time = time.time()
-    while self._ros_node is None and time.time() - start_time < timeout:
-        time.sleep(0.1)
-
-    if self._ros_node is None:
-        raise RuntimeError("Failed to initialize ROS2 node within timeout")
-
-    logging.info("ROS2 node created, waiting for executor to start spinning...")
-
-    # Wait for executor to start spinning
-    if not spin_started.wait(timeout=5.0):
-        raise RuntimeError("ROS2 executor failed to start spinning")
-
-    logging.info("ROS2 executor started for action publishing")

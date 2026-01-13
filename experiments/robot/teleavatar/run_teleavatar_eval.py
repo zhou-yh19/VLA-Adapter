@@ -17,12 +17,11 @@ from typing import Optional, Union
 import draccus
 import numpy as np
 import tqdm
-import time
+from time import time
 
 # Append current directory so that interpreter can find experiments.robot
 sys.path.append("../..")
 from experiments.robot.teleavatar.teleavatar_utils import (
-    # get_libero_dummy_action,
     get_teleavatar_chest_image,
     get_teleavatar_left_wrist_image,
     get_teleavatar_right_wrist_image,
@@ -54,8 +53,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-# Import ROS2 interface
-from experiments.robot.teleavatar.ros2_interface import TeleavatarROS2Interface
+# Import Robot interface
+from experiments.robot.teleavatar.robot_interface import TeleavatarRobotInterface
 
 
 @dataclass
@@ -85,11 +84,11 @@ class GenerateConfig:
     #################################################################################################################
     # Teleavatar runtime parameters
     #################################################################################################################
-    control_frequency: float = 20.0                  # Control loop frequency in Hz               
+    control_frequency: float = 100                   # Control loop frequency in Hz               
     task_description: str = "right_grip_grab_a_stuffed_animal_into_left_box" 
                                                      # Language instruction for the robot
     num_episodes: int = 10                           # Number of episodes to run
-    max_episode_steps: int = 250                     # Maximum steps per episode (0 = unlimited)
+    max_episode_steps: int = 250                     # Maximum VLA inference count per episode (0 = unlimited)
 
     #################################################################################################################
     # Utils
@@ -143,12 +142,12 @@ def initialize_model(cfg: GenerateConfig):
     processor = None
     if cfg.model_family == "openvla":
         processor = get_processor(cfg)
-        check_unnorm_key(cfg, model)
+        check_unnorm_key(cfg)
 
     return model, action_head, proprio_projector, noisy_action_projector, processor
 
 
-def check_unnorm_key(cfg: GenerateConfig, model) -> None:
+def check_unnorm_key(cfg: GenerateConfig) -> None:
     """Check that the model contains the action un-normalization key."""
     # Set the unnorm_key in cfg
     cfg.unnorm_key = "right_grip_grab_a_stuffed_animal_into_left_box"
@@ -211,13 +210,13 @@ def prepare_observation(obs, resize_size, norm_stats):
 def run_episode(
     cfg: GenerateConfig,
     task_description: str,
+    robot_interface: TeleavatarRobotInterface,
     model,
     resize_size,
     processor=None,
     action_head=None,
     proprio_projector=None,
     noisy_action_projector=None,
-    initial_state=None,
     log_file=None,
 ):
     """Run a single episode in the environment."""
@@ -225,20 +224,19 @@ def run_episode(
     action_queue = deque(maxlen=cfg.num_open_loop_steps)
 
     # Run episode
-    # 在这个函数中调用ros2_interface来与teleavatar进行交互
     try:
-        while t < max_steps + cfg.num_steps_wait:
-            # Do nothing for the first few timesteps to let objects stabilize
-            if t < cfg.num_steps_wait:
-                # obs, reward, done, info = env.step(get_libero_dummy_action(cfg.model_family))
-                t += 1
-                continue
+        t = 0
+        action_publish_interval = 1.0 / cfg.control_frequency
+        start_time = None
 
-            # Prepare observation
-            observation = prepare_observation(obs, resize_size, model.norm_stats)
-
-            # If action queue is empty, requery model
+        # VLA inference count is cfg.max_episode_steps
+        while t < cfg.max_episode_steps:
+            
             if len(action_queue) == 0:
+                # If action queue is empty, requery model
+                obs = robot_interface.get_observation()
+                observation = prepare_observation(obs, resize_size, model.norm_stats)
+
                 # Query model to get action
                 actions = get_action(
                     cfg,
@@ -253,7 +251,9 @@ def run_episode(
                     use_minivlm=cfg.use_minivlm
                 )
 
-                action_queue.extend(actions) 
+                # Add actions to queue
+                action_queue.extend(actions)
+                t += 1
 
             # Get action from queue
             action = action_queue.popleft()
@@ -261,12 +261,14 @@ def run_episode(
             # Denormalize action
             action = denormalize_action_for_teleavatar(action, model.norm_stats)
 
-            # Execute action in environment
-            obs, reward, done, info = env.step(action.tolist())
-            if done:
-                success = True
-                break
-            t += 1
+            # publish action to Teleavatar via ROS2 interface
+            if start_time is not None:
+                stop_time = time()
+                interval = stop_time - start_time
+                if interval < action_publish_interval:
+                    time.sleep(action_publish_interval - interval)
+            robot_interface.publish_action(action)
+            start_time = time()
 
     except Exception as e:
         log_message(f"Episode error: {e}", log_file)
@@ -275,6 +277,7 @@ def run_episode(
 
 def run_eval_runtime(
     cfg: GenerateConfig,
+    robot_interface: TeleavatarRobotInterface,
     model,
     resize_size,
     processor=None,
@@ -284,9 +287,6 @@ def run_eval_runtime(
     log_file=None,
 ):
     """Run teleavatar runtime for multi episodes."""
-    # Initialize ros2 interface
-
-
     # Start Episodes
     for episode_idx in tqdm.tqdm(range(cfg.num_episodes)):
         log_message(f"\nEpisode: {episode_idx}", log_file)
@@ -295,6 +295,7 @@ def run_eval_runtime(
         run_episode(
             cfg,
             cfg.task_description.replace("_", " "),
+            robot_interface,
             model,
             resize_size,
             processor,
@@ -328,9 +329,13 @@ def eval_teleavatar(cfg: GenerateConfig):
     log_file = setup_logging(cfg)
     log_message(f"Evaluation Finetuned VLA-Adapter Model on Teleavatar", log_file)
 
+    # Robot interface can initialize ros2_interface
+    robot_interface = TeleavatarRobotInterface()
+
     # Start evaluation
     run_eval_runtime(
         cfg,
+        robot_interface,
         model,
         resize_size,
         processor,
