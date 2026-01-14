@@ -237,7 +237,6 @@ def run_episode(
                 # If action queue is empty, requery model
                 obs = robot_interface.get_observation()
                 observation = prepare_observation(obs)
-                # observation = prepare_observation(obs, resize_size, model.norm_stats)
 
                 # Query model to get action
                 actions = get_action(

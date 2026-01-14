@@ -7,6 +7,14 @@ Usage:
     python vla-scripts/merge_lora_weights_and_save.py \
         --base_checkpoint openvla/openvla-7b \
         --lora_finetuned_checkpoint_dir /PATH/TO/CHECKPOINT/DIR/
+
+My Bash command:
+```bash
+CUDA_VISIBLE_DEVICES=1 python vla-scripts/merge_lora_weights_and_save.py \
+    --lora_finetuned_checkpoint_dir outputs/Teleavatar-stuffed-animal \
+    --vlm_path pretrained_models/prism-qwen25-extra-dinosiglip-224px-0_5b \
+    --use_minivla True \
+```
 """
 
 import os
@@ -50,12 +58,16 @@ def main(cfg: ConvertConfig) -> None:
 
     if cfg.use_minivla:
         hf_token = ''
-        vlm = load_vla(
-            cfg.vlm_path,
-            hf_token=hf_token,
-            load_for_training=True,
-            )
-        config = AutoConfig.from_pretrained("../pretrained_models/configs/config.json")
+        if 'prism-qwen25-extra-dinosiglip-224px-0_5b' in cfg.vlm_path:
+            
+            vlm = load(cfg.vlm_path, hf_token=hf_token, load_for_training=True)
+        else:
+            vlm = load_vla(
+                cfg.vlm_path,
+                hf_token=hf_token,
+                load_for_training=True,
+                )
+        config = AutoConfig.from_pretrained("pretrained_models/configs/config.json")
         vla = AutoModelForVision2Seq.from_config(config, torch_dtype=torch.bfloat16)
         # for name, param in model.named_parameters():
         #     print(f"{name}: {param.shape}")
