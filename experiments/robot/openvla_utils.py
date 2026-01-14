@@ -37,7 +37,9 @@ from prismatic.vla.datasets.rlds.utils.data_utils import NormalizationType
 DATE = time.strftime("%Y_%m_%d")
 DATE_TIME = time.strftime("%Y_%m_%d-%H_%M_%S")
 DEVICE = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
-OPENVLA_IMAGE_SIZE = 224  # Standard image size expected by OpenVLA
+
+from experiments.robot.robot_utils import get_image_resize_size
+OPENVLA_IMAGE_SIZE = get_image_resize_size()  # Standard image size expected by OpenVLA
 
 # Configure NumPy print settings
 np.set_printoptions(formatter={"float": lambda x: "{0:0.3f}".format(x)})
@@ -798,13 +800,10 @@ def get_vla_action(
         # Process proprioception data if used
         proprio = None
         if cfg.use_proprio:
-            if 'right_grip_grab_a_stuffed_animal_into_left_box' in vla.norm_stats:
-                proprio = obs["state"]
-            else:
-                proprio = obs["state"]
-                proprio_norm_stats = vla.norm_stats[cfg.unnorm_key]["proprio"]
-                obs["state"] = normalize_proprio(proprio, proprio_norm_stats)
-                proprio = obs["state"]
+            proprio = obs["state"]
+            proprio_norm_stats = vla.norm_stats[cfg.unnorm_key]["proprio"]
+            obs["state"] = normalize_proprio(proprio, proprio_norm_stats)
+            proprio = obs["state"]
                 
         # Generate action
         if action_head is None:

@@ -573,6 +573,12 @@ CUDA_VISIBLE_DEVICES=1 python experiments/robot/libero/run_libero_eval.py \
   --use_pro_version True \
   > eval_logs/shihaoran--Spatial--SHR--chkpt.log 2>&1 &
 ```
+评估vla-adapter-teleavatar
+```bash
+CUDA_VISIBLE_DEVICES=1 python experiments/robot/teleavatar/run_teleavatar_eval.py \
+  --pretrained_checkpoint outputs/Teleavatar-stuffed-animal \
+  > eval_logs/shihaoran--teleavatar--stuffed_animal--chkpt.log 2>&1 &
+```
 
 If you want to get the inference **throughput**, you can run it in the `run_libero_eval.py` file. You can add  `start = time.time()` and `end = time.time()` before and after `lines 334--345` and calculate the difference between the two. This difference is the time it takes to generate `8 chunks`. This gives you the inference throughput. We measured it multiple times and took the average value of `0.036s`.
 

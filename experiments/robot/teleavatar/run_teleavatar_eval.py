@@ -21,23 +21,14 @@ from time import time
 
 # Append current directory so that interpreter can find experiments.robot
 sys.path.append("../..")
-from experiments.robot.teleavatar.teleavatar_utils import (
-    get_teleavatar_chest_image,
-    get_teleavatar_left_wrist_image,
-    get_teleavatar_right_wrist_image,
-    get_teleavatar_state,
-    denormalize_action_for_teleavatar,
-)
 from experiments.robot.openvla_utils import (
     get_action_head,
     get_processor,
     get_proprio_projector,
-    resize_image_for_policy,
 )
 from experiments.robot.robot_utils import (
     DATE_TIME,
     get_action,
-    # get_image_resize_size,
     get_model,
     set_seed_everywhere,
 )
@@ -84,11 +75,11 @@ class GenerateConfig:
     #################################################################################################################
     # Teleavatar runtime parameters
     #################################################################################################################
-    control_frequency: float = 100                   # Control loop frequency in Hz               
+    control_frequency: float = 30                    # Control loop frequency in Hz               
     task_description: str = "right_grip_grab_a_stuffed_animal_into_left_box" 
                                                      # Language instruction for the robot
     num_episodes: int = 10                           # Number of episodes to run
-    max_episode_steps: int = 250                     # Maximum VLA inference count per episode (0 = unlimited)
+    max_episode_steps: int = 180                     # Maximum VLA inference count per episode (0 = unlimited)
 
     #################################################################################################################
     # Utils
@@ -142,15 +133,15 @@ def initialize_model(cfg: GenerateConfig):
     processor = None
     if cfg.model_family == "openvla":
         processor = get_processor(cfg)
-        check_unnorm_key(cfg)
+        check_unnorm_key(cfg, model)
 
     return model, action_head, proprio_projector, noisy_action_projector, processor
 
 
-def check_unnorm_key(cfg: GenerateConfig) -> None:
+def check_unnorm_key(cfg: GenerateConfig, model) -> None:
     """Check that the model contains the action un-normalization key."""
     # Set the unnorm_key in cfg
-    cfg.unnorm_key = "right_grip_grab_a_stuffed_animal_into_left_box"
+    cfg.unnorm_key = list(model.norm_stats.keys())[0]
 
 
 
@@ -180,24 +171,35 @@ def log_message(message: str, log_file=None):
 
 
 
-def prepare_observation(obs, resize_size, norm_stats):
+def _get_teleavatar_chest_image(obs):
+    """Get chest raw-image from ros2 interface."""
+    return obs['images']['head_camera']
+
+def _get_teleavatar_left_wrist_image(obs):
+    """Get left-wrist raw-image from ros2 interface."""
+    return obs['images']['left_color']
+
+def _get_teleavatar_right_wrist_image(obs):
+    """Get right-wrist raw-image from ros2 interface."""
+    return obs['images']['right_color']
+
+def _get_teleavatar_state(obs):
+    """Get proprio from ros2 interface and normalize"""
+    return obs['state']
+
+def prepare_observation(obs):
     """Prepare observation for policy input."""
     # Get raw images
-    chest_img = get_teleavatar_chest_image(obs)
-    left_wrist_img = get_teleavatar_left_wrist_image(obs)
-    right_wrist_img = get_teleavatar_right_wrist_image(obs)
+    chest_img = _get_teleavatar_chest_image(obs)
+    left_wrist_img = _get_teleavatar_left_wrist_image(obs)
+    right_wrist_img = _get_teleavatar_right_wrist_image(obs)
 
     # Get state
-    state = get_teleavatar_state(obs, norm_stats)
-
-    # Resize images to size expected by model
-    chest_img = resize_image_for_policy(chest_img, resize_size)
-    left_wrist_img = resize_image_for_policy(left_wrist_img, resize_size)
-    right_wrist_img = resize_image_for_policy(right_wrist_img, resize_size)
+    state = _get_teleavatar_state(obs)
 
     # Prepare observations dict
     observation = {
-        "chest_image": chest_img,
+        "full_image": chest_img,
         "left_wrist_image": left_wrist_img,
         "right_wrist_image": right_wrist_img,
         "state": state,
@@ -212,7 +214,6 @@ def run_episode(
     task_description: str,
     robot_interface: TeleavatarRobotInterface,
     model,
-    resize_size,
     processor=None,
     action_head=None,
     proprio_projector=None,
@@ -235,7 +236,8 @@ def run_episode(
             if len(action_queue) == 0:
                 # If action queue is empty, requery model
                 obs = robot_interface.get_observation()
-                observation = prepare_observation(obs, resize_size, model.norm_stats)
+                observation = prepare_observation(obs)
+                # observation = prepare_observation(obs, resize_size, model.norm_stats)
 
                 # Query model to get action
                 actions = get_action(
@@ -258,9 +260,6 @@ def run_episode(
             # Get action from queue
             action = action_queue.popleft()
 
-            # Denormalize action
-            action = denormalize_action_for_teleavatar(action, model.norm_stats)
-
             # publish action to Teleavatar via ROS2 interface
             if start_time is not None:
                 stop_time = time()
@@ -279,7 +278,6 @@ def run_eval_runtime(
     cfg: GenerateConfig,
     robot_interface: TeleavatarRobotInterface,
     model,
-    resize_size,
     processor=None,
     action_head=None,
     proprio_projector=None,
@@ -297,7 +295,6 @@ def run_eval_runtime(
             cfg.task_description.replace("_", " "),
             robot_interface,
             model,
-            resize_size,
             processor,
             action_head,
             proprio_projector,
@@ -321,10 +318,6 @@ def eval_teleavatar(cfg: GenerateConfig):
     # Initialize model and components
     model, action_head, proprio_projector, noisy_action_projector, processor = initialize_model(cfg)
 
-    # Get expected image dimensions
-    # resize_size = get_image_resize_size(cfg)
-    resize_size = tuple(model.module.config.image_sizes)
-
     # Setup logging
     log_file = setup_logging(cfg)
     log_message(f"Evaluation Finetuned VLA-Adapter Model on Teleavatar", log_file)
@@ -337,7 +330,6 @@ def eval_teleavatar(cfg: GenerateConfig):
         cfg,
         robot_interface,
         model,
-        resize_size,
         processor,
         action_head,
         proprio_projector,
