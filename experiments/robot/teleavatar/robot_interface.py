@@ -61,8 +61,8 @@ class TeleavatarROS2Interface(Node):
         )
         self.create_subscription(
             Image,
-            '/head/image_raw',   # use head_camera image
-            # '/xr_video_topic/image_raw',   # use chest_camera image
+            '/head/image_raw',   # use chest_camera image
+            # '/xr_video_topic/image_raw',   # use head_camera image
             lambda msg: self._image_callback(msg, 'head_camera'),
             10
         )
@@ -278,7 +278,7 @@ class TeleavatarROS2Interface(Node):
 
 
 
-class TeleavatarRobotInterface():
+class TeleavatarRobotInterface:
     """Environment for Teleavatar dual-arm robot."""
 
     def __init__(self):
@@ -325,7 +325,7 @@ class TeleavatarRobotInterface():
         self._ros_thread.start()
 
         # Wait for ROS2 interface object to be created
-        timeout = 10.0
+        timeout = 30.0
         start_time = time.time()
         while self._ros_interface is None and time.time() - start_time < timeout:
             time.sleep(0.1)
@@ -382,7 +382,7 @@ class TeleavatarRobotInterface():
         return obs
 
 
-    def apply_action(self, action: np.ndarray) -> None:
+    def apply_action(self, actions: np.ndarray) -> None:
         """Apply action to the robot.
 
         Args:
@@ -391,10 +391,6 @@ class TeleavatarRobotInterface():
         if self._ros_interface is None:
             raise RuntimeError("ROS2 interface not initialized")
 
-        if 'actions' not in action:
-            raise ValueError(f"Action dict must contain 'actions' key, got: {action.keys()}")
-
-        actions = action['actions']
         if not isinstance(actions, np.ndarray):
             actions = np.array(actions, dtype=np.float32)
 

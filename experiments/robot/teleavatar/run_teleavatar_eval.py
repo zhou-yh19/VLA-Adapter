@@ -17,7 +17,7 @@ from typing import Optional, Union
 import draccus
 import numpy as np
 import tqdm
-from time import time
+import time
 
 # Append current directory so that interpreter can find experiments.robot
 sys.path.append("../..")
@@ -79,7 +79,7 @@ class GenerateConfig:
     task_description: str = "right_grip_grab_a_stuffed_animal_into_left_box" 
                                                      # Language instruction for the robot
     num_episodes: int = 10                           # Number of episodes to run
-    max_episode_steps: int = 180                     # Maximum VLA inference count per episode (0 = unlimited)
+    max_episode_steps: int = 90                     # Maximum VLA inference count per episode (0 = unlimited)
 
     #################################################################################################################
     # Utils
@@ -261,12 +261,12 @@ def run_episode(
 
             # publish action to Teleavatar via ROS2 interface
             if start_time is not None:
-                stop_time = time()
+                stop_time = time.time()
                 interval = stop_time - start_time
                 if interval < action_publish_interval:
                     time.sleep(action_publish_interval - interval)
-            robot_interface.publish_action(action)
-            start_time = time()
+            robot_interface.apply_action(action)
+            start_time = time.time()
 
     except Exception as e:
         log_message(f"Episode error: {e}", log_file)
@@ -314,17 +314,23 @@ def eval_teleavatar(cfg: GenerateConfig):
     # Set random seed
     set_seed_everywhere(cfg.seed)
 
-    # Initialize model and components
-    model, action_head, proprio_projector, noisy_action_projector, processor = initialize_model(cfg)
-
     # Setup logging
     log_file = setup_logging(cfg)
-    log_message(f"Evaluation Finetuned VLA-Adapter Model on Teleavatar", log_file)
+
+    # Initialize model and components
+    log_message("Initializing Finetuned VLA-Adapter...", log_file)
+    start_time = time.time()
+    model, action_head, proprio_projector, noisy_action_projector, processor = initialize_model(cfg)
+    initialize_model_period = time.time() - start_time
+    log_message(f"Initialize model period: {initialize_model_period:.2f} seconds", log_file)
+    log_message(f"model is on {model.device}", log_file)
 
     # Robot interface can initialize ros2_interface
+    log_message("Initializing Teleavatar Robot Interface...", log_file)
     robot_interface = TeleavatarRobotInterface()
 
     # Start evaluation
+    log_message("Starting Evaluation...", log_file)
     run_eval_runtime(
         cfg,
         robot_interface,
@@ -342,6 +348,8 @@ def eval_teleavatar(cfg: GenerateConfig):
     # Close log file
     if log_file:
         log_file.close()
+
+    return
 
 
 if __name__ == "__main__":

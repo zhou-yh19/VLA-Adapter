@@ -20,6 +20,7 @@ import tqdm
 from libero.libero import benchmark
 
 import wandb
+from time import time
 
 # Append current directory so that interpreter can find experiments.robot
 sys.path.append("../..")
@@ -486,7 +487,9 @@ def eval_libero(cfg: GenerateConfig) -> float:
     set_seed_everywhere(cfg.seed)
 
     # Initialize model and components
+    start_time = time()
     model, action_head, proprio_projector, noisy_action_projector, processor = initialize_model(cfg)
+    initialize_model_period = time() - start_time
 
     # for name, param in model.named_parameters():
     #     if 'action_queries' in name: 
@@ -503,6 +506,8 @@ def eval_libero(cfg: GenerateConfig) -> float:
     task_suite = benchmark_dict[cfg.task_suite_name]()
     num_tasks = task_suite.n_tasks
 
+    log_message(f"Initialize model period: {initialize_model_period:.2f} seconds", log_file)
+    log_message(f"model is on {model.device}", log_file)
     log_message(f"Task suite: {cfg.task_suite_name}", log_file)
 
     # Start evaluation

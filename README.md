@@ -551,8 +551,8 @@ CUDA_VISIBLE_DEVICES=0 python vla-scripts/evaluate_calvin.py \
 判断程序能否正常运行
 ```bash
 # Launch LIBERO-Spatial-Pro evals (Background running)
-CUDA_VISIBLE_DEVICES=1 python experiments/robot/libero/run_libero_eval.py \
-  --load_in_8bit True\
+export CUDA_VISIBLE_DEVICES=1
+python experiments/robot/libero/run_libero_eval.py \
   --use_proprio True \
   --num_images_in_input 2 \
   --use_film False \
@@ -564,7 +564,8 @@ CUDA_VISIBLE_DEVICES=1 python experiments/robot/libero/run_libero_eval.py \
 使用自己的模型判断评估能否顺利进行
 ```bash
 # Launch LIBERO-Spatial-Pro evals (Background running)
-CUDA_VISIBLE_DEVICES=1 python experiments/robot/libero/run_libero_eval.py \
+export CUDA_VISIBLE_DEVICES=1
+python experiments/robot/libero/run_libero_eval.py \
   --use_proprio True \
   --num_images_in_input 2 \
   --use_film False \
@@ -575,7 +576,9 @@ CUDA_VISIBLE_DEVICES=1 python experiments/robot/libero/run_libero_eval.py \
 ```
 评估vla-adapter-teleavatar
 ```bash
-CUDA_VISIBLE_DEVICES=1 python experiments/robot/teleavatar/run_teleavatar_eval.py \
+startros2 && rosdomain
+export CUDA_VISIBLE_DEVICES=1
+python experiments/robot/teleavatar/run_teleavatar_eval.py \
   --pretrained_checkpoint outputs/Teleavatar-stuffed-animal \
   > eval_logs/shihaoran--teleavatar--stuffed_animal--chkpt.log 2>&1 &
 ```
