@@ -990,4 +990,5 @@ OXE_STANDARDIZATION_TRANSFORMS = {
     "aloha1_put_X_into_pot_300_demos": aloha_dataset_transform,
     ### teleavatar fine-tuning datasets
     "right_grip_grab_a_stuffed_animal_into_left_box": teleavatar_dataset_transform,
+    "build_blocks": teleavatar_dataset_transform,
 }

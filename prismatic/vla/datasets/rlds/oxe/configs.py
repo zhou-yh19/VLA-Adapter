@@ -726,7 +726,18 @@ OXE_DATASET_CONFIGS = {
     "right_grip_grab_a_stuffed_animal_into_left_box": {
         "image_obs_keys": {
             "primary": "chest_camera", 
-            # "secondary": "head_camera",
+            "secondary": None, 
+            "left_wrist": "left_color", 
+            "right_wrist":"right_color",
+        },
+        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "state_obs_keys": ["state"],
+        "state_encoding": StateEncoding.TELEAVATAR,
+        "action_encoding": ActionEncoding.TELEAVATAR,
+    },
+    "build_blocks": {
+        "image_obs_keys": {
+            "primary": "chest_camera", 
             "secondary": None, 
             "left_wrist": "left_color", 
             "right_wrist":"right_color",

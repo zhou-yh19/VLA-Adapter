@@ -148,6 +148,7 @@ dmypy.json
 # Caches and Datasets
 cache/
 data/
+outputs
 outputs/
 logs/
 pretrained_models/

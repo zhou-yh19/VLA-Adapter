@@ -72,10 +72,10 @@ class FinetuneConfig:
     resum_vla_path: str = "openvla/openvla-7b"       # Path to OpenVLA model (on HuggingFace Hub or stored locally)
 
     # Dataset
-    data_root_dir: Path = Path("data/shihaoran")      # Directory containing RLDS datasets
+    data_root_dir: Path = Path("data/shr")      # Directory containing RLDS datasets
     dataset_name: str = "right_grip_grab_a_stuffed_animal_into_left_box"    # Name of fine-tuning dataset (e.g., `aloha_scoop_x_into_bowl`)
     run_root_dir: Path = Path("outputs")                # Path to directory to store logs & checkpoints
-    shuffle_buffer_size: int = 1000               # Dataloader shuffle buffer size (can reduce if OOM errors occur)
+    shuffle_buffer_size: int = 3200               # Dataloader shuffle buffer size (can reduce if OOM errors occur， 64x50=3200)
 
     # Algorithm and architecture
     use_l1_regression: bool = True                   # If True, trains continuous action head with L1 regression objective
@@ -91,7 +91,7 @@ class FinetuneConfig:
     learning_rate: float = 2e-4                      # Learning rate
     lr_warmup_steps: int = 0.1                       # Number of steps to warm up learning rate (from 10% to 100%)
     num_steps_before_decay: int = 30000             # Number of steps before LR decays by 10x
-    grad_accumulation_steps: int = 8                 # Number of gradient accumulation steps - Increased to maintain effective batch size (16*4=64)
+    grad_accumulation_steps: int = 1                 # Number of gradient accumulation steps - Increased to maintain effective batch size (16*4=64)
     max_steps: int = 20000                          # Max number of training steps
     use_val_set: bool = False                        # If True, uses validation set and log validation metrics
     val_freq: int = 10_000                           # (When `use_val_set==True`) Validation set logging frequency in steps

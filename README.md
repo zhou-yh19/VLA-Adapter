@@ -456,6 +456,22 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --standalone --nnodes 1 --nproc-per-node 4
 > logs/VLA-Adapter--spatial--$current_time.log 2>&1 &
 ```
 
+抓毛绒玩具训练指令
+```bash
+torchrun --standalone --nnodes 1 --nproc-per-node 8 vla-scripts/finetune_teleavatar_server.py \
+--run_id_note VLA-Adapter--teleavatar--stuffed_animals \
+> logs/VLA-Adapter--teleavatar--stuffed_animals.log 2>&1 &
+```
+
+叠方块训练指令
+```bash
+torchrun --standalone --nnodes 1 --nproc-per-node 8 vla-scripts/finetune_teleavatar_server.py \
+--dataset_name build_blocks \
+--wandb_project build_blocks \
+--run_id_note VLA-Adapter--teleavatar--build_blocks \
+> logs/VLA-Adapter--teleavatar--build_blocks.log 2>&1 &
+```
+
 Please note that the obtained models will be stored in the `/outputs` folder. Each model will take up nearly `3GB` of memory, so you need to reserve enough space. We strongly recommend that you get our trained model from [VLA-Adapter HuggingFace](https://huggingface.co/VLA-Adapter) and place it in this folder for inference.
 
 ## :mechanical_arm: Inference

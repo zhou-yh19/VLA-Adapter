@@ -962,7 +962,7 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
             NUM_PATCHES,
             NUM_PROMPT_TOKENS,
             action_head=action_head,
-            proprio=proprio, # [8]
+            proprio=proprio, # [14: left-arm-7, right-arm-7]
             proprio_projector=proprio_projector,
             )
            
