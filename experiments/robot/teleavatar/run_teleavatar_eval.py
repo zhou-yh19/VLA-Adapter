@@ -2,6 +2,10 @@
 run_teleavatar_eval.py
 
 Evaluates a trained policy on a Teleavatar.
+
+```bash
+python experiments/robot/teleavatar/run_teleavatar_eval.py   --pretrained_checkpoint outputs/Teleavatar-stuffed-animal   > eval_logs/shihaoran--teleavatar--stuffed_animal--chkpt.log 2>&1 &
+```
 """
 
 import json
@@ -224,6 +228,8 @@ def run_episode(
     # Initialize action queue
     action_queue = deque(maxlen=cfg.num_open_loop_steps)
 
+    inference_time_ls = list()
+
     # Run episode
     try:
         t = 0
@@ -234,6 +240,8 @@ def run_episode(
         while t < cfg.max_episode_steps:
             
             if len(action_queue) == 0:
+                inference_start_time = time.time()
+                
                 # If action queue is empty, requery model
                 obs = robot_interface.get_observation()
                 observation = prepare_observation(obs)
@@ -251,6 +259,9 @@ def run_episode(
                     use_film=cfg.use_film,
                     use_minivlm=cfg.use_minivlm
                 )
+
+                inference_end_time = time.time()
+                inference_time_ls.append(inference_end_time - inference_start_time)
 
                 # Add actions to queue
                 action_queue.extend(actions)
@@ -271,6 +282,7 @@ def run_episode(
     except Exception as e:
         log_message(f"Episode error: {e}", log_file)
 
+    return inference_time_ls
 
 
 def run_eval_runtime(
@@ -284,12 +296,14 @@ def run_eval_runtime(
     log_file=None,
 ):
     """Run teleavatar runtime for multi episodes."""
+    inference_time_ls = list()
+
     # Start Episodes
     for episode_idx in tqdm.tqdm(range(cfg.num_episodes)):
-        log_message(f"\nEpisode: {episode_idx}", log_file)
+        log_message(f"Episode: {episode_idx}", log_file)
 
         # Run episode
-        run_episode(
+        episode_inference_time_ls = run_episode(
             cfg,
             cfg.task_description.replace("_", " "),
             robot_interface,
@@ -301,7 +315,11 @@ def run_eval_runtime(
             log_file,
         )
 
-        log_message(f"\nEpisode: {episode_idx} has finished!!", log_file)
+        inference_time_ls.extend(episode_inference_time_ls)
+
+        log_message(f"Episode: {episode_idx} has finished!!", log_file)
+    
+    return inference_time_ls
 
 
 
@@ -331,7 +349,7 @@ def eval_teleavatar(cfg: GenerateConfig):
 
     # Start evaluation
     log_message("Starting Evaluation...", log_file)
-    run_eval_runtime(
+    inference_time_ls = run_eval_runtime(
         cfg,
         robot_interface,
         model,
@@ -344,6 +362,9 @@ def eval_teleavatar(cfg: GenerateConfig):
 
     # Log final results
     log_message(f"Total episodes: {cfg.num_episodes}", log_file)
+    log_message(f"Inference time list: {inference_time_ls}", log_file)
+    log_message(f"Max inference time: {max(inference_time_ls):.3f} seconds", log_file)
+    log_message(f"Average inference time: {sum(inference_time_ls) / len(inference_time_ls):.3f} seconds", log_file)
 
     # Close log file
     if log_file:

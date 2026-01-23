@@ -294,6 +294,8 @@ class TeleavatarRobotInterface:
         # Initialize ROS2 interface in a separate thread
         self._ros_interface: Optional[TeleavatarROS2Interface] = None
         self._ros_thread: Optional[threading.Thread] = None
+        self._executor = None  # Will be set to MultiThreadedExecutor instance
+        self._shutdown_flag = threading.Event()
         self._init_ros2()
 
 
@@ -310,16 +312,35 @@ class TeleavatarRobotInterface:
             # Spin in background
             executor = rclpy.executors.MultiThreadedExecutor()
             executor.add_node(self._ros_interface)
+            self._executor = executor
 
             # Signal that spinning is about to start
             spin_started.set()
 
             try:
-                executor.spin()
+                # Use spin_once in a loop to allow graceful shutdown
+                while not self._shutdown_flag.is_set():
+                    executor.spin_once(timeout_sec=0.1)
+            except Exception as e:
+                logging.error(f"Error in ROS2 executor: {e}")
             finally:
-                executor.shutdown()
-                self._ros_interface.destroy_node()
-                rclpy.shutdown()
+                # Shutdown executor before destroying node
+                try:
+                    if executor is not None:
+                        executor.shutdown(timeout_sec=1.0)
+                except Exception as e:
+                    logging.warning(f"Error shutting down executor: {e}")
+                
+                try:
+                    if self._ros_interface is not None:
+                        self._ros_interface.destroy_node()
+                except Exception as e:
+                    logging.warning(f"Error destroying node: {e}")
+                
+                try:
+                    rclpy.shutdown()
+                except Exception as e:
+                    logging.warning(f"Error shutting down rclpy: {e}")
 
         self._ros_thread = threading.Thread(target=ros_spin, daemon=True)
         self._ros_thread.start()
@@ -401,7 +422,26 @@ class TeleavatarRobotInterface:
         # Publish to ROS2
         self._ros_interface.publish_action(actions)
 
+    def shutdown(self):
+        """Gracefully shutdown ROS2 interface."""
+        if self._shutdown_flag.is_set():
+            return  # Already shutting down
+        
+        logging.info("Shutting down ROS2 interface...")
+        self._shutdown_flag.set()
+        
+        # Wait for thread to finish (with timeout)
+        if self._ros_thread is not None and self._ros_thread.is_alive():
+            self._ros_thread.join(timeout=5.0)
+            if self._ros_thread.is_alive():
+                logging.warning("ROS2 thread did not terminate within timeout")
+        
+        logging.info("ROS2 interface shutdown complete")
+
     def __del__(self):
         """Cleanup when environment is destroyed."""
-        if self._ros_thread is not None and self._ros_thread.is_alive():
-            logging.info("Shutting down ROS2 thread...")
+        try:
+            if not self._shutdown_flag.is_set():
+                self.shutdown()
+        except Exception:
+            pass  # Ignore errors during cleanup

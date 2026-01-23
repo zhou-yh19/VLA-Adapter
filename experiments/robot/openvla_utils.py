@@ -305,7 +305,7 @@ def get_vla(cfg: Any) -> torch.nn.Module:
         torch_dtype=torch.bfloat16,
         load_in_8bit=cfg.load_in_8bit,
         load_in_4bit=cfg.load_in_4bit,
-        low_cpu_mem_usage=False,
+        low_cpu_mem_usage=True,  # 优化：使用低内存模式可以加快大模型加载速度
         trust_remote_code=False,
     )
 
@@ -407,7 +407,25 @@ def get_processor(cfg: Any) -> AutoProcessor:
     Returns:
         AutoProcessor: The model's processor
     """
-    return AutoProcessor.from_pretrained(cfg.pretrained_checkpoint, trust_remote_code=False)
+    # 检测是否为本地路径：如果路径存在且是目录，则认为是本地路径
+    # 这样可以避免调用 HfApi 导致的延迟和潜在的网络问题
+    is_local_path = os.path.isdir(cfg.pretrained_checkpoint) or os.path.exists(cfg.pretrained_checkpoint)
+    
+    # 如果看起来是本地路径，直接使用 trust_remote_code=True
+    # 否则尝试检测是否为 HF Hub 路径
+    if is_local_path:
+        trust_remote_code = True
+    else:
+        # 尝试检测是否为 HF Hub 路径
+        trust_remote_code = not model_is_on_hf_hub(cfg.pretrained_checkpoint)
+    
+    # 如果是本地 checkpoint，先注册 Auto Classes（与 get_vla 保持一致）
+    if trust_remote_code:
+        AutoConfig.register("openvla", OpenVLAConfig)
+        AutoImageProcessor.register(OpenVLAConfig, PrismaticImageProcessor)
+        AutoProcessor.register(OpenVLAConfig, PrismaticProcessor)
+    
+    return AutoProcessor.from_pretrained(cfg.pretrained_checkpoint, trust_remote_code=trust_remote_code)
 
 
 def get_proprio_projector(cfg: Any, llm_dim: int, proprio_dim: int) -> ProprioProjector:
