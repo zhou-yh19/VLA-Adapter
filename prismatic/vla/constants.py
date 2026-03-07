@@ -13,6 +13,8 @@ IGNORE_INDEX = -100
 ACTION_TOKEN_BEGIN_IDX  = 151386
 STOP_INDEX = 2  # '</s>'
 NUM_TOKENS = 64 # the number of action queries tokens
+NUM_STAGES = 8  # the number of stage tokens (query embeddings)
+NUM_STAGE_CLASSES = 4  # the number of stage classes for classification (output 4 probabilities)
 
 
 # Defines supported normalization schemes for action and proprioceptive state.

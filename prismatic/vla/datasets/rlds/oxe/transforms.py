@@ -991,4 +991,6 @@ OXE_STANDARDIZATION_TRANSFORMS = {
     ### teleavatar fine-tuning datasets
     "right_grip_grab_a_stuffed_animal_into_left_box": teleavatar_dataset_transform,
     "build_blocks": teleavatar_dataset_transform,
+    "organize_the_desk": teleavatar_dataset_transform,
+    "organize_the_desk_stage": teleavatar_dataset_transform,
 }

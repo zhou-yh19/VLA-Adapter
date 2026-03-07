@@ -5,10 +5,10 @@ Lightweight PyTorch Dataset Definition for wrapping RLDS TFDS Pipeline; just def
 format to OpenVLA, IterableDataset shim.
 """
 
-
+import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Tuple, Type
+from typing import Any, Dict, Optional, Tuple, Type
 import numpy as np
 import random
 import torch
@@ -20,10 +20,44 @@ from prismatic.models.backbones.llm.prompting import PromptBuilder, QwenPromptBu
 from prismatic.models.backbones.vision import ImageTransform
 from prismatic.util.data_utils import tree_map
 from prismatic.vla.action_tokenizer import ActionTokenizer
-from prismatic.vla.constants import ACTION_DIM, ACTION_PROPRIO_NORMALIZATION_TYPE, ACTION_TOKEN_BEGIN_IDX, IGNORE_INDEX, NUM_ACTIONS_CHUNK, PROPRIO_DIM, STOP_INDEX, NUM_TOKENS
+from prismatic.vla.constants import (
+    ACTION_DIM,
+    ACTION_PROPRIO_NORMALIZATION_TYPE,
+    ACTION_TOKEN_BEGIN_IDX,
+    IGNORE_INDEX,
+    NUM_ACTIONS_CHUNK,
+    PROPRIO_DIM,
+    STOP_INDEX,
+    NUM_TOKENS,
+)
 from prismatic.vla.datasets.rlds import make_interleaved_dataset, make_single_dataset
 from prismatic.vla.datasets.rlds.oxe import OXE_NAMED_MIXTURES, get_oxe_dataset_kwargs_and_weights
 
+
+def extract_last_number(line: str) -> Optional[int]:
+    """
+    从单行提示词提取最后一个数字。
+    - current task: Task4 → 4
+    - current task: None 且 completed tasks: task1, task2, task3 → 3
+    """
+    m = re.search(r"current task:\s*(task(\d+)|None)\s*\.?\s*$", line.strip())
+    if not m:
+        return None
+    if m.group(1) != "None":
+        return int(m.group(2))
+    comp = re.search(r"completed tasks:\s*(.*?)\.\s*current task:", line)
+    if not comp or comp.group(1).strip() == "None":
+        return 0
+    return len(re.findall(r"task\d+", comp.group(1)))
+
+
+def remove_current_task_from_prompt(lang: str) -> str:
+    """
+    从 language_instruction 中移除末尾的 "Current task: taskN." / "Current task: None."，
+    只保留「已完成任务」等描述，使模型必须依赖视觉+已完成任务来预测当前任务，避免文本捷径。
+    Stage 标签仍从原始 lang 用 extract_last_number 解析（VLM 标注的 current task）。
+    """
+    return re.sub(r"\s*current task:\s*(task\d+|None)\s*\.?\s*$", "", lang, flags=re.IGNORECASE).strip()
 
 
 @dataclass
@@ -45,6 +79,13 @@ class RLDSBatchTransform:
         lang = rlds_batch["task"]["language_instruction"].decode().lower()
         actions = rlds_batch["action"]
 
+        # 从 language_instruction 解析 stage：仅当解析结果为 1–4 时添加 stage 特征（非 RLDS 必须）
+        # CrossEntropy 要求类别下标为 0~num_classes-1，故存 0-indexed（0,1,2,3），不能存 1~4
+        stage_raw = extract_last_number(lang)
+        stage_class_index = (stage_raw - 1) if (stage_raw is not None and 1 <= stage_raw <= 4) else None
+        # 做 stage 预测时：prompt 中不包含 "Current task"，只保留已完成任务，迫使模型依赖视觉+语言预测当前任务
+        lang_for_prompt = remove_current_task_from_prompt(lang) if stage_class_index is not None else lang
+
         # Construct Chat-based Prompt =>> Input is default query + language instruction, output are the action tokens
         prompt_builder = self.prompt_builder_fn("openvla")
 
@@ -63,7 +104,7 @@ class RLDSBatchTransform:
             action_chunk_len = len(flattened_action_chunk_string) 
 
             conversation = [
-                {"from": "human", "value": f"What action should the robot take to {lang}?"},
+                {"from": "human", "value": f"What action should the robot take to {lang_for_prompt}?"},
                 {"from": "gpt", "value": ''},
             ]
 
@@ -97,7 +138,7 @@ class RLDSBatchTransform:
             action_chunk_len = len(action_chunk_string)
 
             conversation = [
-                {"from": "human", "value": f"What action should the robot take to {lang}?"},
+                {"from": "human", "value": f"What action should the robot take to {lang_for_prompt}?"},
                 {"from": "gpt", "value": action_chunk_string[0]},
             ]
             # remove action token
@@ -125,7 +166,15 @@ class RLDSBatchTransform:
         if not self.predict_stop_token:
             labels[-1] = IGNORE_INDEX
 
-        return_dict = dict(pixel_values=pixel_values, input_ids=input_ids, labels=labels, dataset_name=dataset_name, actions=actions)
+        return_dict = dict(
+            pixel_values=pixel_values,
+            input_ids=input_ids,
+            labels=labels,
+            dataset_name=dataset_name,
+            actions=actions,
+        )
+        if stage_class_index is not None:
+            return_dict["stage"] = torch.tensor(stage_class_index, dtype=torch.long)
 
         # Add additional inputs
         if self.use_wrist_image:
@@ -171,6 +220,10 @@ class RLDSDataset(IterableDataset):
         elif "right_grip_grab_a_stuffed_animal_into_left_box" in self.data_mix:
             load_camera_views = ("primary", "secondary", "left_wrist", "right_wrist")
         elif "build_blocks" in self.data_mix:
+            load_camera_views = ("primary", "secondary", "left_wrist", "right_wrist")
+        elif "organize_the_desk" in self.data_mix:
+            load_camera_views = ("primary", "secondary", "left_wrist", "right_wrist")
+        elif "organize_the_desk_stage" in self.data_mix:
             load_camera_views = ("primary", "secondary", "left_wrist", "right_wrist")
         else:
             load_camera_views = ("primary", "wrist")

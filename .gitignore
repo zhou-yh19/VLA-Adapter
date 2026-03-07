@@ -148,6 +148,9 @@ dmypy.json
 # Caches and Datasets
 cache/
 data/
+data
+organize_desk_datasets/
+organize_desk_datasets
 outputs
 outputs/
 logs/
@@ -156,4 +159,3 @@ pretrained_models/
 # Rollout videos and wandb logs
 rollouts/
 wandb/
-data

@@ -472,6 +472,20 @@ torchrun --standalone --nnodes 1 --nproc-per-node 8 vla-scripts/finetune_teleava
 > logs/VLA-Adapter--teleavatar--build_blocks.log 2>&1 &
 ```
 
+整理桌面【VLA-Adapter】(finetune_teleavatar_server.py 提高了训练过程loss数据上传频率)
+```bash
+torchrun --standalone --nnodes 1 --nproc-per-node 8 vla-scripts/finetune_teleavatar_server.py \
+--run_id_note VLA-Adapter--teleavatar--organize_the_desk \
+> logs/VLA-Adapter--teleavatar--organize_the_desk.log 2>&1 &
+```
+
+整理桌面【VLA-Adapter-Stage】(finetune_stage_server.py 修改了模型架构)
+```bash
+torchrun --standalone --nnodes 1 --nproc-per-node 8 vla-scripts/finetune_stage_server.py \
+--run_id_note VLA-Adapter-Stage--teleavatar--organize_the_desk_stage \
+> logs/VLA-Adapter-Stage--teleavatar--organize_the_desk_stage.log 2>&1 &
+```
+
 Please note that the obtained models will be stored in the `/outputs` folder. Each model will take up nearly `3GB` of memory, so you need to reserve enough space. We strongly recommend that you get our trained model from [VLA-Adapter HuggingFace](https://huggingface.co/VLA-Adapter) and place it in this folder for inference.
 
 ## :mechanical_arm: Inference
@@ -602,6 +616,15 @@ python experiments/robot/teleavatar/run_teleavatar_eval.py \
 If you want to get the inference **throughput**, you can run it in the `run_libero_eval.py` file. You can add  `start = time.time()` and `end = time.time()` before and after `lines 334--345` and calculate the difference between the two. This difference is the time it takes to generate `8 chunks`. This gives you the inference throughput. We measured it multiple times and took the average value of `0.036s`.
 
 <br/>
+
+查看是否还有finetune_stage_server.py进程在运行
+```bash
+ps aux | grep finetune_stage_server.py
+```
+删除finetune_stage_server.py所有正在运行的进程
+```bash
+pkill -9 -f "finetune_stage_server.py"
+```
 
 ## 🌈 Success Rate Comparison <a name="results"></a>
 

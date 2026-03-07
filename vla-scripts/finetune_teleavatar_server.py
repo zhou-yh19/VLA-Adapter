@@ -72,8 +72,8 @@ class FinetuneConfig:
     resum_vla_path: str = "openvla/openvla-7b"       # Path to OpenVLA model (on HuggingFace Hub or stored locally)
 
     # Dataset
-    data_root_dir: Path = Path("data/shr")      # Directory containing RLDS datasets
-    dataset_name: str = "right_grip_grab_a_stuffed_animal_into_left_box"    # Name of fine-tuning dataset (e.g., `aloha_scoop_x_into_bowl`)
+    data_root_dir: Path = Path("organize_desk_datasets")      # Directory containing RLDS datasets
+    dataset_name: str = "organize_the_desk"    # Name of fine-tuning dataset (e.g., `aloha_scoop_x_into_bowl`)
     run_root_dir: Path = Path("outputs")                # Path to directory to store logs & checkpoints
     shuffle_buffer_size: int = 3200               # Dataloader shuffle buffer size (can reduce if OOM errors occur， 64x50=3200)
 
@@ -117,10 +117,11 @@ class FinetuneConfig:
 
     # Logging
     wandb_entity: str = "shihaoran99"          # Name of WandB entity
-    wandb_project: str = "right_grip_grab_a_stuffed_animal_into_left_box"        # Name of WandB project
+    wandb_project: str = "vla-adapter-stage"        # Name of WandB project
+    wandb_run_id: str = "adapter_stage_raw"        # Name of WandB run
     run_id_note: Optional[str] = None                # Extra note to add to end of run ID for logging
     run_id_override: Optional[str] = None            # Optional string to override the run ID with
-    wandb_log_freq: int = 10                         # WandB logging frequency in steps
+    wandb_log_freq: int = 1                         # WandB logging frequency in steps
 
     # revision version
     use_pro_version: bool = True                     # the version number
@@ -152,43 +153,6 @@ def remove_ddp_in_checkpoint(state_dict) -> dict:
         else:
             new_state_dict[k] = v
     return new_state_dict
-
-
-
-def get_run_id(cfg) -> str:
-    """
-    Generates or retrieves an identifier string for an experiment run.
-
-    Args:
-        cfg (FinetuneConfig): Training configuration.
-
-    Returns:
-        str: Experiment run ID.
-    """
-    if cfg.run_id_override is not None:
-        # Override the run ID with the user-provided ID
-        run_id = cfg.run_id_override
-    elif cfg.resume:
-        # Override run ID with the previous resumed run's ID
-        run_id = cfg.config_file_path.split("/")[-1]
-        # Remove the "--XXX_chkpt" suffix from the run ID if it exists
-        if "chkpt" in run_id.split("--")[-1]:
-            run_id = "--".join(run_id.split("--")[:-1])
-    else:
-        run_id = (
-            f"{cfg.config_file_path.split('/')[-1]}+{cfg.dataset_name}"
-            f"+b{cfg.batch_size * cfg.grad_accumulation_steps}"
-            f"+lr-{cfg.learning_rate}"
-        )
-        if cfg.use_fz:
-            run_id += f"+frozen+dropout-{cfg.lora_dropout}"
-        if cfg.use_lora:
-            run_id += f"+lora-r{cfg.lora_rank}+dropout-{cfg.lora_dropout}"
-        if cfg.image_aug:
-            run_id += "--image_aug"
-        if cfg.run_id_note is not None:
-            run_id += f"--{cfg.run_id_note}"
-    return run_id
 
 
 
@@ -483,7 +447,7 @@ def log_metrics_to_wandb(metrics, prefix, step, wandb_entity) -> None:
     for name, value in metrics.items():
         # Map loss_value to Loss for better readability in W&B
         if name == "loss_value":
-            log_dict[f"{prefix}/Loss"] = value
+            log_dict["loss"] = value
         # Keep other metrics as is
         else:
             log_dict[f"{prefix}/{name.replace('_', ' ').title()}"] = value
@@ -714,8 +678,8 @@ def finetune(cfg: FinetuneConfig) -> None:
     print(f"Fine-tuning OpenVLA Model `{cfg.config_file_path}` on `{cfg.dataset_name}`")
 
     # Get experiment run ID
-    run_id = get_run_id(cfg)
-
+    # run_id = get_run_id(cfg)
+    run_id = cfg.wandb_run_id
     # Create experiment run directory
     run_dir = cfg.run_root_dir / run_id
     os.makedirs(run_dir, exist_ok=True)
@@ -728,7 +692,7 @@ def finetune(cfg: FinetuneConfig) -> None:
 
     # Initialize wandb logging
     if distributed_state.is_main_process:
-        wandb.init(project=cfg.wandb_project, name=f"ft+{run_id}", mode="offline")
+        wandb.init(project=cfg.wandb_project, name=f"{run_id}", mode="online")
 
     # Print detected constants
     print(
@@ -1006,10 +970,10 @@ def finetune(cfg: FinetuneConfig) -> None:
     # Deque to store recent train metrics (used for computing smoothened metrics for gradient accumulation)
     recent_metrics = {
         "loss_value": deque(maxlen=cfg.grad_accumulation_steps),
-        "curr_action_accuracy": deque(maxlen=cfg.grad_accumulation_steps),
-        "curr_action_l1_loss": deque(maxlen=cfg.grad_accumulation_steps),
-        "next_actions_accuracy": deque(maxlen=cfg.grad_accumulation_steps),
-        "next_actions_l1_loss": deque(maxlen=cfg.grad_accumulation_steps),
+        # "curr_action_accuracy": deque(maxlen=cfg.grad_accumulation_steps),
+        # "curr_action_l1_loss": deque(maxlen=cfg.grad_accumulation_steps),
+        # "next_actions_accuracy": deque(maxlen=cfg.grad_accumulation_steps),
+        # "next_actions_l1_loss": deque(maxlen=cfg.grad_accumulation_steps),
     }
 
     # Start training
@@ -1064,15 +1028,15 @@ def finetune(cfg: FinetuneConfig) -> None:
                 for param_group in optimizer.param_groups:
                     param_group["lr"] = current_lr
 
-            if distributed_state.is_main_process and gradient_step_idx % cfg.wandb_log_freq == 0:
-                # Log the learning rate
-                # Make sure to do this AFTER any learning rate modifications (e.g., warmup/decay)
-                wandb.log(
-                    {
-                        "VLA Train/Learning Rate": scheduler.get_last_lr()[0],
-                    },
-                    step=log_step,
-                )
+            # if distributed_state.is_main_process and gradient_step_idx % cfg.wandb_log_freq == 0:
+            #     # Log the learning rate
+            #     # Make sure to do this AFTER any learning rate modifications (e.g., warmup/decay)
+            #     wandb.log(
+            #         {
+            #             "VLA Train/Learning Rate": scheduler.get_last_lr()[0],
+            #         },
+            #         step=log_step,
+            #     )
 
             # Optimizer and LR scheduler step
             if (batch_idx + 1) % cfg.grad_accumulation_steps == 0:

@@ -162,6 +162,11 @@ class PaddedCollatorForActionPrediction:
         else:
             proprio = None
 
+        # Stack stage 仅当本 batch 中所有样本都有 stage 时添加（stage 为可选特征，非 RLDS 必须；取值 1–4 对应类别 0–3）
+        stage = None
+        if all("stage" in inst for inst in instances):
+            stage = torch.stack([instance["stage"] for instance in instances])
+
         output = dict(
             pixel_values=pixel_values,
             proprio=proprio,
@@ -172,4 +177,6 @@ class PaddedCollatorForActionPrediction:
         )
         if dataset_names is not None:
             output["dataset_names"] = dataset_names
+        if stage is not None:
+            output["stage"] = stage
         return output

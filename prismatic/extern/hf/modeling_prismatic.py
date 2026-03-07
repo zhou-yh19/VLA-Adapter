@@ -30,6 +30,7 @@ from prismatic.vla.constants import (
     ACTION_TOKEN_BEGIN_IDX,
     IGNORE_INDEX,
     NUM_ACTIONS_CHUNK,
+    NUM_STAGES,
     STOP_INDEX,
     NormalizationType,
     NUM_TOKENS
@@ -371,6 +372,10 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
         self.pad_token_id = config.pad_token_id
         self.llm_dim = config.text_config.hidden_size
         
+        #Stage query token
+        self.stage_queries = nn.Embedding(NUM_STAGES, self.llm_dim)
+        self.stage_queries.weight.data.zero_()
+        
         #Action query token
         self.action_queries = nn.Embedding(NUM_TOKENS, self.llm_dim)
         self.action_queries.weight.data.zero_()
@@ -482,6 +487,47 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
             # For simplicity, just append proprio token to the end of projected vision patch tokens
             return torch.cat((projected_patch_embeddings, proprio_features), dim=1)
         return projected_patch_embeddings
+
+    def _insert_stage_queries(self, input_embeddings, attention_mask, labels):
+        """
+        Insert stage query embeddings before the first action token.
+        The attention mask simply ensures that neither stage nor action is treated as padding.
+        """
+        if labels is None:
+            return input_embeddings, attention_mask
+
+        all_actions_mask = self._process_action_masks(labels)
+        if not torch.any(all_actions_mask):
+            return input_embeddings, attention_mask
+
+        action_start_idx = torch.where(all_actions_mask[0])[0][0].item()
+        stage_queries = self.stage_queries.weight.unsqueeze(0).expand(input_embeddings.shape[0], -1, -1)
+        input_embeddings = torch.cat(
+            [
+                input_embeddings[:, :action_start_idx, :],
+                stage_queries,
+                input_embeddings[:, action_start_idx:, :],
+            ],
+            dim=1,
+        )
+
+        if attention_mask is not None:
+            stage_attention_mask = torch.full(
+                (attention_mask.shape[0], NUM_STAGES),
+                fill_value=True,
+                dtype=attention_mask.dtype,
+                device=attention_mask.device,
+            )
+            attention_mask = torch.cat(
+                [
+                    attention_mask[:, :action_start_idx],
+                    stage_attention_mask,
+                    attention_mask[:, action_start_idx:],
+                ],
+                dim=1,
+            )
+
+        return input_embeddings, attention_mask
 
     def _build_multimodal_attention(self, input_embeddings, projected_patch_embeddings, attention_mask):
         """Build multimodal embeddings and attention mask"""
@@ -631,6 +677,8 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
                 all_actions_mask = self._process_action_masks(labels)
                 input_embeddings = self._replace_input_embeddings(
                     input_embeddings, all_actions_mask, action_queries)
+
+            input_embeddings, attention_mask = self._insert_stage_queries(input_embeddings, attention_mask, labels)
 
             # Build multimodal embeddings & attention mask
             multimodal_embeddings, multimodal_attention_mask = self._build_multimodal_attention(
@@ -824,6 +872,7 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
         action_queries = action_queries.view(1, action_queries.shape[0], action_queries.shape[1]).repeat(input_embeddings.shape[0], 1, 1)  # (b, chunk_size, h)
         # Replace action token embeddings with noisy action embeddings
         input_embeddings = self._replace_input_embeddings(input_embeddings.clone(), all_actions_mask, action_queries)
+        input_embeddings, attention_mask = self._insert_stage_queries(input_embeddings, attention_mask, labels)
 
         # Build multimodal embeddings and attention mask
         multimodal_embeddings, multimodal_attention_mask = self._build_multimodal_attention(
@@ -852,7 +901,8 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
             # Get hidden states for text portion of prompt+response (after the vision patches)
             text_hidden_states = item
             # Get hidden states for action portion of response
-            actions_hidden_states = text_hidden_states[:, NUM_PATCHES+ NUM_PROMPT_TOKENS : NUM_PATCHES + NUM_PROMPT_TOKENS + NUM_TOKENS, :,].reshape(1, 1, NUM_TOKENS, -1).to(torch.bfloat16)
+            actions_start = NUM_PATCHES + NUM_PROMPT_TOKENS + NUM_STAGES
+            actions_hidden_states = text_hidden_states[:, actions_start : actions_start + NUM_TOKENS, :,].reshape(1, 1, NUM_TOKENS, -1).to(torch.bfloat16)
             
             batch_size = item.shape[0]
             task_latten_states = item[:, :NUM_PATCHES].reshape(batch_size, 1, NUM_PATCHES , -1)

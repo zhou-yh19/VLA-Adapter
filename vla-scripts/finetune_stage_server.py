@@ -51,12 +51,15 @@ from prismatic.vla.constants import (
     ACTION_DIM,
     ACTION_PROPRIO_NORMALIZATION_TYPE,
     NUM_ACTIONS_CHUNK,
+    NUM_STAGE_CLASSES,
     PROPRIO_DIM,
+    NUM_STAGES,
     NUM_TOKENS
 )
 from prismatic.vla.datasets import RLDSDataset, RLDSBatchTransform
 from prismatic.vla.datasets.rlds.utils.data_utils import save_dataset_statistics
 from prismatic.models import load, load_vla
+from stage_classifier import StageClassifier_1
 
 
 
@@ -72,8 +75,8 @@ class FinetuneConfig:
     resum_vla_path: str = "openvla/openvla-7b"       # Path to OpenVLA model (on HuggingFace Hub or stored locally)
 
     # Dataset
-    data_root_dir: Path = Path("data/shr")      # Directory containing RLDS datasets
-    dataset_name: str = "right_grip_grab_a_stuffed_animal_into_left_box"    # Name of fine-tuning dataset (e.g., `aloha_scoop_x_into_bowl`)
+    data_root_dir: Path = Path("organize_desk_datasets")      # Directory containing RLDS datasets
+    dataset_name: str = "organize_the_desk_stage"    # Name of fine-tuning dataset (e.g., `aloha_scoop_x_into_bowl`)
     run_root_dir: Path = Path("outputs")                # Path to directory to store logs & checkpoints
     shuffle_buffer_size: int = 3200               # Dataloader shuffle buffer size (can reduce if OOM errors occur， 64x50=3200)
 
@@ -117,16 +120,19 @@ class FinetuneConfig:
 
     # Logging
     wandb_entity: str = "shihaoran99"          # Name of WandB entity
-    wandb_project: str = "right_grip_grab_a_stuffed_animal_into_left_box"        # Name of WandB project
+    wandb_project: str = "vla-adapter-stage"        # Name of WandB project
+    wandb_run_id: str = "adapter_stage_2"        # Name of WandB run
     run_id_note: Optional[str] = None                # Extra note to add to end of run ID for logging
     run_id_override: Optional[str] = None            # Optional string to override the run ID with
-    wandb_log_freq: int = 10                         # WandB logging frequency in steps
+    wandb_log_freq: int = 1                         # WandB logging frequency in steps
 
     # revision version
     use_pro_version: bool = True                     # the version number
     phase: str = "Training"
     # fmt: on
 
+    # loss lambda
+    loss_lambda: float = 0.1
 
 
 def remove_ddp_in_checkpoint(state_dict) -> dict:
@@ -152,43 +158,6 @@ def remove_ddp_in_checkpoint(state_dict) -> dict:
         else:
             new_state_dict[k] = v
     return new_state_dict
-
-
-
-def get_run_id(cfg) -> str:
-    """
-    Generates or retrieves an identifier string for an experiment run.
-
-    Args:
-        cfg (FinetuneConfig): Training configuration.
-
-    Returns:
-        str: Experiment run ID.
-    """
-    if cfg.run_id_override is not None:
-        # Override the run ID with the user-provided ID
-        run_id = cfg.run_id_override
-    elif cfg.resume:
-        # Override run ID with the previous resumed run's ID
-        run_id = cfg.config_file_path.split("/")[-1]
-        # Remove the "--XXX_chkpt" suffix from the run ID if it exists
-        if "chkpt" in run_id.split("--")[-1]:
-            run_id = "--".join(run_id.split("--")[:-1])
-    else:
-        run_id = (
-            f"{cfg.config_file_path.split('/')[-1]}+{cfg.dataset_name}"
-            f"+b{cfg.batch_size * cfg.grad_accumulation_steps}"
-            f"+lr-{cfg.learning_rate}"
-        )
-        if cfg.use_fz:
-            run_id += f"+frozen+dropout-{cfg.lora_dropout}"
-        if cfg.use_lora:
-            run_id += f"+lora-r{cfg.lora_rank}+dropout-{cfg.lora_dropout}"
-        if cfg.image_aug:
-            run_id += "--image_aug"
-        if cfg.run_id_note is not None:
-            run_id += f"--{cfg.run_id_note}"
-    return run_id
 
 
 
@@ -298,7 +267,8 @@ def run_forward_pass(
     num_patches,
     compute_diffusion_l1=False,
     use_pro_version=True,
-    cfg=None
+    cfg=None,
+    stage_classifier=None,
 ) -> Tuple[torch.Tensor, Dict[str, float]]:
     """
     Compute model forward pass and metrics for both training and validation.
@@ -337,7 +307,7 @@ def run_forward_pass(
             input_ids=batch["input_ids"].to(device_id),
             attention_mask=batch["attention_mask"].to(device_id),
             pixel_values=batch["pixel_values"].to(torch.bfloat16).to(device_id),
-            labels=batch["labels"],
+            labels=batch["labels"].to(device_id),
             output_hidden_states=True,
             proprio=batch["proprio"] if use_proprio else None,
             proprio_projector=proprio_projector if use_proprio else None,
@@ -347,7 +317,7 @@ def run_forward_pass(
             use_film=use_film,
             )
 
-    # Get action masks needed for logging
+    # Get action masks (only needed for discrete next-token prediction path)
     ground_truth_token_ids = batch["labels"][:,1:].to(device_id)
     current_action_mask = get_current_action_mask(ground_truth_token_ids)
     next_actions_mask = get_next_actions_mask(ground_truth_token_ids)
@@ -392,21 +362,16 @@ def run_forward_pass(
         
     # Compute metrics for continuous action representations (L1 regression)
     else:
-        # Get last layer hidden states
+        batch_size = batch["input_ids"].shape[0]
         multi_layer_hidden_states = []
-        
         for item in output.hidden_states[0:]:
-            # last_hidden_states = output.hidden_states[-1]  # (B, seq_len, D)
-            # Get hidden states for text portion of prompt+response (after the vision patches)
-            text_hidden_states = item[:, num_patches:-1]
-            # Get hidden states for action portion of response
-            batch_size = batch["input_ids"].shape[0]
-            # actions_hidden_states = text_hidden_states[:, -1, :].reshape(batch_size, 1, -1).to(torch.bfloat16)
-            actions_hidden_states = text_hidden_states[current_action_mask | next_actions_mask].reshape(batch_size, 1,NUM_TOKENS, -1).to(torch.bfloat16)
-            task_latten_states = item[:, :num_patches].reshape(batch_size, 1, num_patches , -1)
-            all_hidden_states = torch.cat((task_latten_states, actions_hidden_states),2)
-            multi_layer_hidden_states.append(all_hidden_states)
-        multi_layer_hidden_states = torch.cat(multi_layer_hidden_states, dim = 1)
+            # item 是逐层提取的，LLM有多少层，item就有多少个
+            # 一个 item：一个 Tensor，shape (B, seq_len, D)，表示这一层上、batch_size 条样本、整段序列的 hidden states
+            # Sequence order: [BOS, patch(768), language, stage(8), action(64), stop] → split out patch + action
+            patch_states = item[:, :num_patches].reshape(batch_size, 1, num_patches, -1)
+            action_states = item[:, -(NUM_TOKENS + 1):-1].reshape(batch_size, 1, NUM_TOKENS, -1).to(torch.bfloat16)
+            multi_layer_hidden_states.append(torch.cat((patch_states, action_states), dim=2))
+        multi_layer_hidden_states = torch.cat(multi_layer_hidden_states, dim=1)
 
         predicted_actions = action_head.module.predict_action(
             multi_layer_hidden_states,
@@ -415,13 +380,32 @@ def run_forward_pass(
             phase=cfg.phase,
             )
 
-        loss = torch.nn.L1Loss()(predicted_actions, ground_truth_actions)
+        loss1 = torch.nn.L1Loss()(predicted_actions, ground_truth_actions)
 
-        metrics.update(
-            {
-                "loss_value": loss.item(),  # Detached value for logging
-            }
-        )
+        # Stage classification: softmax[W @ stage^T @ w + b], input 8 tokens (B,8,896), output 4 logits
+        # loss2 backprops through stage_hidden -> output.hidden_states[-1] -> LLM
+        if  "stage" in batch:
+            last_layer = output.hidden_states[-1]  # (B, seq_len, D), part of VLA graph
+            stage_hidden = last_layer[:, -(NUM_TOKENS + 1 + NUM_STAGES) : -(NUM_TOKENS + 1), :]  # (B, 8, D)
+            stage_logits = stage_classifier.module(stage_hidden.float())  # (B, 4)
+            stage_labels = batch["stage"].long().to(device_id)  # (B,), values in [0,1,2,3]
+            # loss2 = F.cross_entropy(stage_logits, stage_labels)
+            loss2 = nn.CrossEntropyLoss(label_smoothing=0.1)(stage_logits, stage_labels)
+            loss = loss1 + cfg.loss_lambda * loss2  # backward on loss updates both action head and LLM (via loss2)
+            metrics.update(
+                {
+                    "loss_value": loss.item(),
+                    "loss1_action": loss1.item(),
+                    "loss2_stage": loss2.item(),
+                }
+            )
+        else:
+            loss = loss1
+            metrics.update(
+                {
+                    "loss_value": loss.item(),
+                }
+            )
 
         # Get detailed L1 losses for logging
         should_log_l1_loss = use_l1_regression
@@ -483,7 +467,7 @@ def log_metrics_to_wandb(metrics, prefix, step, wandb_entity) -> None:
     for name, value in metrics.items():
         # Map loss_value to Loss for better readability in W&B
         if name == "loss_value":
-            log_dict[f"{prefix}/Loss"] = value
+            log_dict["loss"] = value
         # Keep other metrics as is
         else:
             log_dict[f"{prefix}/{name.replace('_', ' ').title()}"] = value
@@ -503,7 +487,7 @@ def save_training_checkpoint(
     train_dataset,
     distributed_state,
     new_state_dict,
-    
+    stage_classifier=None,
 ) -> None:
     """
     Save all training checkpoints including model components, LoRA adapter, and dataset statistics.
@@ -565,6 +549,9 @@ def save_training_checkpoint(
         if cfg.use_l1_regression and action_head is not None:
             torch.save(action_head.state_dict(), checkpoint_dir / f"action_head--{checkpoint_name_suffix}")
 
+        if stage_classifier is not None:
+            torch.save(stage_classifier.state_dict(), checkpoint_dir / f"stage_classifier--{checkpoint_name_suffix}")
+
         if cfg.use_film:
             # To be safe, just save the entire vision backbone (not just FiLM components)
             torch.save(
@@ -581,6 +568,7 @@ def save_training_checkpoint(
             config = AutoConfig.from_pretrained("pretrained_models/configs/config.json")
             base_vla = AutoModelForVision2Seq.from_config(config, torch_dtype=torch.bfloat16)  # Create a new model with configuration, the parameters are randomly initialized
             # print(new_state_dict['action_queries.weight'])
+            new_state_dict['stage_queries.weight']  = vla.state_dict()['module.base_model.model.stage_queries.weight'].cpu()
             new_state_dict['action_queries.weight'] = vla.state_dict()['module.base_model.model.action_queries.weight'].cpu()
             missing_keys, unexpected_keys = base_vla.load_state_dict(new_state_dict, strict=False)
             
@@ -714,7 +702,7 @@ def finetune(cfg: FinetuneConfig) -> None:
     print(f"Fine-tuning OpenVLA Model `{cfg.config_file_path}` on `{cfg.dataset_name}`")
 
     # Get experiment run ID
-    run_id = get_run_id(cfg)
+    run_id = cfg.wandb_run_id
 
     # Create experiment run directory
     run_dir = cfg.run_root_dir / run_id
@@ -728,7 +716,7 @@ def finetune(cfg: FinetuneConfig) -> None:
 
     # Initialize wandb logging
     if distributed_state.is_main_process:
-        wandb.init(project=cfg.wandb_project, name=f"ft+{run_id}", mode="offline")
+        wandb.init(project=cfg.wandb_project, name=f"{run_id}", mode="online")
 
     # Print detected constants
     print(
@@ -839,13 +827,13 @@ def finetune(cfg: FinetuneConfig) -> None:
         )
         vla = get_peft_model(vla, lora_config)
         for name, param in vla.named_parameters():
-            if "action_queries" in name:
+            if "action_queries" in name or "stage_queries" in name:
                 param.requires_grad = True
         vla.print_trainable_parameters()
 
     else:
         for name, param in vla.named_parameters():
-            if "action_queries" in name:
+            if "action_queries" in name or "stage_queries" in name:
                 param.requires_grad = True
 
     # FiLM setup
@@ -899,6 +887,17 @@ def finetune(cfg: FinetuneConfig) -> None:
     NUM_PATCHES = vla.module.vision_backbone.get_num_patches() * vla.module.vision_backbone.get_num_images_in_input()
     # If we have proprio inputs, a single proprio embedding is appended to the end of the vision patch embeddings
 
+    # Stage classifier: softmax[W@stage^T@w+b], input (B,8,llm_dim), output (B,4); gradient flows to LLM
+    stage_classifier = wrap_ddp(
+        StageClassifier_1(
+            llm_dim=vla.module.llm_dim,
+            num_stage_classes=NUM_STAGE_CLASSES,
+            # num_stage_tokens=NUM_STAGES,
+        ).to(device_id),
+        device_id,
+        find_unused=False,
+    )
+
     # Instantiate optimizer
     trainable_params = [param for param in vla.parameters() if param.requires_grad]
     if cfg.use_l1_regression:
@@ -906,6 +905,7 @@ def finetune(cfg: FinetuneConfig) -> None:
 
     if cfg.use_proprio:
         trainable_params += [param for param in proprio_projector.parameters() if param.requires_grad]
+    trainable_params += [param for param in stage_classifier.parameters() if param.requires_grad]
     print(f"# total trainable params: {sum(p.numel() for p in trainable_params)}")
     optimizer = AdamW(trainable_params, lr=cfg.learning_rate)
 
@@ -1006,10 +1006,12 @@ def finetune(cfg: FinetuneConfig) -> None:
     # Deque to store recent train metrics (used for computing smoothened metrics for gradient accumulation)
     recent_metrics = {
         "loss_value": deque(maxlen=cfg.grad_accumulation_steps),
-        "curr_action_accuracy": deque(maxlen=cfg.grad_accumulation_steps),
-        "curr_action_l1_loss": deque(maxlen=cfg.grad_accumulation_steps),
-        "next_actions_accuracy": deque(maxlen=cfg.grad_accumulation_steps),
-        "next_actions_l1_loss": deque(maxlen=cfg.grad_accumulation_steps),
+        "loss1_action": deque(maxlen=cfg.grad_accumulation_steps),
+        "loss2_stage": deque(maxlen=cfg.grad_accumulation_steps),
+        # "curr_action_accuracy": deque(maxlen=cfg.grad_accumulation_steps),
+        # "curr_action_l1_loss": deque(maxlen=cfg.grad_accumulation_steps),
+        # "next_actions_accuracy": deque(maxlen=cfg.grad_accumulation_steps),
+        # "next_actions_l1_loss": deque(maxlen=cfg.grad_accumulation_steps),
     }
 
     # Start training
@@ -1017,6 +1019,19 @@ def finetune(cfg: FinetuneConfig) -> None:
         vla.train()
         optimizer.zero_grad()
         for batch_idx, batch in enumerate(dataloader):
+            # Debug: 打印 batch 中的所有内容（仅首个 batch 打印一次）
+            if batch_idx == 0 and distributed_state.is_main_process:
+                print("\n=== batch 内容 ===")
+                for k, v in batch.items():
+                    if isinstance(v, torch.Tensor):
+                        print(f"  {k}: Tensor shape={v.shape}, dtype={v.dtype}")
+                    elif isinstance(v, (list, tuple)):
+                        print(f"  {k}: {type(v).__name__} len={len(v)}")
+                        if len(v) and isinstance(v[0], torch.Tensor):
+                            print(f"      elem[0] shape={v[0].shape}")
+                    else:
+                        print(f"  {k}: {type(v).__name__} = {v}")
+
             # Compute training metrics and loss
             compute_diffusion_l1 = (cfg.use_l1_regression and batch_idx % cfg.diffusion_sample_freq == 0) or (cfg.use_diffusion and batch_idx % cfg.diffusion_sample_freq == 0)
             loss, metrics = run_forward_pass(
@@ -1033,6 +1048,7 @@ def finetune(cfg: FinetuneConfig) -> None:
                 compute_diffusion_l1=compute_diffusion_l1,
                 use_pro_version=cfg.use_pro_version,
                 cfg=cfg,
+                stage_classifier=stage_classifier,
             )
 
             # Normalize loss to account for gradient accumulation
@@ -1095,6 +1111,7 @@ def finetune(cfg: FinetuneConfig) -> None:
                     train_dataset=train_dataset,
                     distributed_state=distributed_state,
                     new_state_dict=RAW_STATE_DICT,
+                    stage_classifier=stage_classifier,
                 )
 
             # Test model on validation set
