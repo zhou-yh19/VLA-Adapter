@@ -59,7 +59,7 @@ from prismatic.vla.constants import (
 from prismatic.vla.datasets import RLDSDataset, RLDSBatchTransform
 from prismatic.vla.datasets.rlds.utils.data_utils import save_dataset_statistics
 from prismatic.models import load, load_vla
-from stage_classifier import StageClassifier_1
+from stage_classifier import StageClassifier_0
 
 
 
@@ -121,7 +121,7 @@ class FinetuneConfig:
     # Logging
     wandb_entity: str = "shihaoran99"          # Name of WandB entity
     wandb_project: str = "vla-adapter-stage"        # Name of WandB project
-    wandb_run_id: str = "adapter_stage_2"        # Name of WandB run
+    wandb_run_id: str = "adapter_stage_3"        # Name of WandB run
     run_id_note: Optional[str] = None                # Extra note to add to end of run ID for logging
     run_id_override: Optional[str] = None            # Optional string to override the run ID with
     wandb_log_freq: int = 1                         # WandB logging frequency in steps
@@ -389,8 +389,8 @@ def run_forward_pass(
             stage_hidden = last_layer[:, -(NUM_TOKENS + 1 + NUM_STAGES) : -(NUM_TOKENS + 1), :]  # (B, 8, D)
             stage_logits = stage_classifier.module(stage_hidden.float())  # (B, 4)
             stage_labels = batch["stage"].long().to(device_id)  # (B,), values in [0,1,2,3]
-            # loss2 = F.cross_entropy(stage_logits, stage_labels)
-            loss2 = nn.CrossEntropyLoss(label_smoothing=0.1)(stage_logits, stage_labels)
+            loss2 = F.cross_entropy(stage_logits, stage_labels)
+            # loss2 = nn.CrossEntropyLoss(label_smoothing=0.1)(stage_logits, stage_labels)
             loss = loss1 + cfg.loss_lambda * loss2  # backward on loss updates both action head and LLM (via loss2)
             metrics.update(
                 {
@@ -889,10 +889,10 @@ def finetune(cfg: FinetuneConfig) -> None:
 
     # Stage classifier: softmax[W@stage^T@w+b], input (B,8,llm_dim), output (B,4); gradient flows to LLM
     stage_classifier = wrap_ddp(
-        StageClassifier_1(
+        StageClassifier_0(
             llm_dim=vla.module.llm_dim,
             num_stage_classes=NUM_STAGE_CLASSES,
-            # num_stage_tokens=NUM_STAGES,
+            num_stage_tokens=NUM_STAGES,
         ).to(device_id),
         device_id,
         find_unused=False,

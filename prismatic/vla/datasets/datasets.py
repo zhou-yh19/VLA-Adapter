@@ -51,13 +51,51 @@ def extract_last_number(line: str) -> Optional[int]:
     return len(re.findall(r"task\d+", comp.group(1)))
 
 
-def remove_current_task_from_prompt(lang: str) -> str:
+def _parse_task_states(lang: str) -> Tuple[list, Optional[int]]:
     """
-    从 language_instruction 中移除末尾的 "Current task: taskN." / "Current task: None."，
-    只保留「已完成任务」等描述，使模型必须依赖视觉+已完成任务来预测当前任务，避免文本捷径。
-    Stage 标签仍从原始 lang 用 extract_last_number 解析（VLM 标注的 current task）。
+    从 language_instruction 解析：已完成任务列表、当前任务编号。
+    - completed tasks: task1, task2 -> [1, 2]；completed tasks: None -> []
+    - current task: task3 -> 3；current task: None -> None
     """
-    return re.sub(r"\s*current task:\s*(task\d+|None)\s*\.?\s*$", "", lang, flags=re.IGNORECASE).strip()
+    completed = []
+    comp_match = re.search(
+        r"completed\s+tasks?:\s*(.*?)(?:\.\s*current\s+task:|$)",
+        lang,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if comp_match:
+        comp_text = comp_match.group(1).strip().lower()
+        if comp_text and comp_text != "none":
+            completed = [int(m.group(1)) for m in re.finditer(r"task(\d+)", comp_text)]
+    current = None
+    curr_match = re.search(r"current\s+task:\s*(task(\d+)|None)\s*\.?\s*$", lang.strip(), flags=re.IGNORECASE)
+    if curr_match and curr_match.group(1).lower() != "none":
+        current = int(curr_match.group(2))
+    return completed, current
+
+
+def add_task_description_suffix(lang: str) -> str:
+    """
+    将四个任务（task1~task4）标注成三种状态后返回，用作 prompt 的 language 部分：
+    - completed tasks 中的任务 -> done
+    - current task -> active
+    - 其余任务 -> waiting
+    若存在 "completed tasks" / "current task" 前的描述文本则保留为前缀。
+    """
+    completed, current = _parse_task_states(lang)
+    # 提取前缀："completed tasks" 之前的内容（若有）
+    prefix_match = re.search(r"^(.+?)\s*completed\s+tasks?", lang, flags=re.IGNORECASE | re.DOTALL)
+    prefix = prefix_match.group(1).strip() if prefix_match and prefix_match.group(1).strip() else ""
+
+    states = []
+    for i in range(1, 5):
+        if i in completed:
+            states.append(f"task{i}:done")
+        elif i == current:
+            states.append(f"task{i}:active")
+        else:
+            states.append(f"task{i}:waiting")
+    return (prefix + ",".join(states)).strip()
 
 
 @dataclass
@@ -84,7 +122,7 @@ class RLDSBatchTransform:
         stage_raw = extract_last_number(lang)
         stage_class_index = (stage_raw - 1) if (stage_raw is not None and 1 <= stage_raw <= 4) else None
         # 做 stage 预测时：prompt 中不包含 "Current task"，只保留已完成任务，迫使模型依赖视觉+语言预测当前任务
-        lang_for_prompt = remove_current_task_from_prompt(lang) if stage_class_index is not None else lang
+        lang_for_prompt = add_task_description_suffix(lang) if stage_class_index is not None else lang
 
         # Construct Chat-based Prompt =>> Input is default query + language instruction, output are the action tokens
         prompt_builder = self.prompt_builder_fn("openvla")
