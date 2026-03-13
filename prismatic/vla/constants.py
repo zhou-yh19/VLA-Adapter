@@ -11,6 +11,7 @@ from enum import Enum
 IGNORE_INDEX = -100
 # ACTION_TOKEN_BEGIN_IDX = 31743
 ACTION_TOKEN_BEGIN_IDX  = 151386
+STAGE_PLACEHOLDER_ID = ACTION_TOKEN_BEGIN_IDX - 1   # must be < ACTION_TOKEN_BEGIN_IDX to avoid action-mask collision
 STOP_INDEX = 2  # '</s>'
 NUM_TOKENS = 64 # the number of action queries tokens
 NUM_STAGES = 8  # the number of stage tokens (query embeddings)

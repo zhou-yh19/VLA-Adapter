@@ -26,7 +26,9 @@ from prismatic.vla.constants import (
     ACTION_TOKEN_BEGIN_IDX,
     IGNORE_INDEX,
     NUM_ACTIONS_CHUNK,
+    NUM_STAGES,
     PROPRIO_DIM,
+    STAGE_PLACEHOLDER_ID,
     STOP_INDEX,
     NUM_TOKENS,
 )
@@ -96,6 +98,28 @@ def add_task_description_suffix(lang: str) -> str:
         else:
             states.append(f"task{i}:waiting")
     return (prefix + ",".join(states)).strip()
+
+
+def get_task_description(lang: str) -> Tuple[str, str]:
+    """Split language_instruction into (high_level_task, low_level_task).
+
+    Returns:
+        high_level_task: prefix description before "completed tasks" (e.g. "organize the desk.")
+        low_level_task:  comma-separated stage states (e.g. "task1:done,task2:active,task3:waiting,task4:waiting")
+    """
+    completed, current = _parse_task_states(lang)
+    prefix_match = re.search(r"^(.+?)\s*completed\s+tasks?", lang, flags=re.IGNORECASE | re.DOTALL)
+    prefix = prefix_match.group(1).strip() if prefix_match and prefix_match.group(1).strip() else ""
+
+    states = []
+    for i in range(1, 5):
+        if i in completed:
+            states.append(f"task{i}:done")
+        elif i == current:
+            states.append(f"task{i}:active")
+        else:
+            states.append(f"task{i}:waiting")
+    return prefix, ",".join(states)
 
 
 @dataclass
@@ -228,8 +252,106 @@ class RLDSBatchTransform:
             return_dict["proprio"] = proprio
 
         return return_dict
-    
-    
+
+
+# Action placeholder token ID used as position marker for _process_action_masks.
+# Any value > ACTION_TOKEN_BEGIN_IDX works; the actual embedding is replaced by action_queries in forward().
+_ACTION_PLACEHOLDER_ID = ACTION_TOKEN_BEGIN_IDX + 1
+
+
+@dataclass
+class RLDSBatchTransform4VLAAdapterStage:
+    """Batch transform for VLA-Adapter Stage training with L1 regression.
+
+    Produces input_ids with the layout:
+        [high_level_prompt] [stage_placeholder×8] [low_level_prompt] [action_placeholder×64]
+    After model forward (vision insertion + embedding replacement) the LLM sees:
+        [BOS] [patches] [high_level_prompt] [stage_queries×8] [low_level_prompt] [action_queries×64]
+    """
+    base_tokenizer: PreTrainedTokenizerBase
+    image_transform: ImageTransform
+    use_wrist_image: bool = False
+    use_proprio: bool = False
+
+    def __call__(self, rlds_batch: Dict[str, Any]) -> Dict[str, Any]:
+        dataset_name = rlds_batch["dataset_name"]
+        img = Image.fromarray(rlds_batch["observation"]["image_primary"][0])
+        lang = rlds_batch["task"]["language_instruction"].decode().lower()
+        actions = rlds_batch["action"]
+
+        # --- Parse stage label (0-indexed: 0,1,2,3) ---
+        stage_raw = extract_last_number(lang)
+        stage_class_index = (stage_raw - 1) if (stage_raw is not None and 1 <= stage_raw <= 4) else None
+
+        # --- Split task description ---
+        if stage_class_index is not None:
+            high_level_task, low_level_task = get_task_description(lang)
+        else:
+            high_level_task, low_level_task = lang, ""
+
+        # --- Encode high-level prompt (system + user question + assistant start) ---
+        high_level_prompt = (
+            f"<|im_start|>system\n"
+            f"You are Qwen, created by Alibaba Cloud. You are a helpful assistant.<|im_end|>\n"
+            f"<|im_start|>user\n"
+            f"What action should the robot take to {high_level_task.lower()}?<|im_end|>\n"
+            f"<|im_start|>assistant\n"
+        )
+        high_ids = self.base_tokenizer(high_level_prompt, add_special_tokens=True).input_ids
+
+        # --- Stage placeholders (replaced by stage_queries in model forward) ---
+        stage_ids = [STAGE_PLACEHOLDER_ID] * NUM_STAGES
+
+        # --- Encode low-level prompt (no special tokens to avoid duplicate BOS) ---
+        low_level_text = low_level_task.lower()+"<|im_end|>\n"
+        if low_level_text:
+            low_ids = self.base_tokenizer(low_level_text, add_special_tokens=False).input_ids
+        else:
+            low_ids = []
+
+        # --- Action placeholders (replaced by action_queries in model forward) ---
+        action_ids = [_ACTION_PLACEHOLDER_ID] * NUM_TOKENS
+
+        # --- Assemble: high | stage | low | action ---
+        stage_start_idx = len(high_ids)
+        input_ids = high_ids + stage_ids + low_ids + action_ids
+        labels = list(input_ids)
+
+        # --- Tensorize ---
+        input_ids = torch.tensor(input_ids)
+        labels = torch.tensor(labels)
+        pixel_values = self.image_transform(img)
+
+        # --- Mask labels: only keep last (NUM_TOKENS + 1) for _process_action_masks ---
+        labels[: -(NUM_TOKENS + 1)] = IGNORE_INDEX
+
+        # --- Assemble return dict ---
+        return_dict = dict(
+            pixel_values=pixel_values,
+            input_ids=input_ids,
+            labels=labels,
+            dataset_name=dataset_name,
+            actions=actions,
+            stage_start_idx=stage_start_idx,
+        )
+
+        if stage_class_index is not None:
+            return_dict["stage"] = torch.tensor(stage_class_index, dtype=torch.long)
+
+        if self.use_wrist_image:
+            all_wrist_pixels = []
+            for k in rlds_batch["observation"].keys():
+                if "wrist" in k:
+                    img_wrist = Image.fromarray(rlds_batch["observation"][k][0])
+                    pixel_values_wrist = self.image_transform(img_wrist)
+                    all_wrist_pixels.append(pixel_values_wrist)
+            return_dict["pixel_values_wrist"] = torch.cat(all_wrist_pixels, dim=0)
+
+        if self.use_proprio and "proprio" in rlds_batch["observation"]:
+            return_dict["proprio"] = rlds_batch["observation"]["proprio"]
+
+        return return_dict
+
 
 class RLDSDataset(IterableDataset):
     def __init__(

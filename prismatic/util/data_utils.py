@@ -167,6 +167,11 @@ class PaddedCollatorForActionPrediction:
         if all("stage" in inst for inst in instances):
             stage = torch.stack([instance["stage"] for instance in instances])
 
+        # Stack stage_start_idx (integer per sample, records where stage placeholders begin in input_ids)
+        stage_start_idx = None
+        if "stage_start_idx" in instances[0]:
+            stage_start_idx = torch.tensor([inst["stage_start_idx"] for inst in instances], dtype=torch.long)
+
         output = dict(
             pixel_values=pixel_values,
             proprio=proprio,
@@ -179,4 +184,6 @@ class PaddedCollatorForActionPrediction:
             output["dataset_names"] = dataset_names
         if stage is not None:
             output["stage"] = stage
+        if stage_start_idx is not None:
+            output["stage_start_idx"] = stage_start_idx
         return output

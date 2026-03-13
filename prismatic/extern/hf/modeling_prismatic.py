@@ -31,6 +31,7 @@ from prismatic.vla.constants import (
     IGNORE_INDEX,
     NUM_ACTIONS_CHUNK,
     NUM_STAGES,
+    STAGE_PLACEHOLDER_ID,
     STOP_INDEX,
     NormalizationType,
     NUM_TOKENS
@@ -529,6 +530,20 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
 
         return input_embeddings, attention_mask
 
+    def _replace_stage_embeddings(self, input_embeddings, input_ids):
+        """Replace stage placeholder positions in input_embeddings with learned stage_queries.
+
+        Unlike _insert_stage_queries (which increases seq_len), this keeps seq_len unchanged.
+        Stage placeholder positions are detected via input_ids == STAGE_PLACEHOLDER_ID.
+        """
+        stage_mask = (input_ids == STAGE_PLACEHOLDER_ID)
+        if not torch.any(stage_mask):
+            return input_embeddings
+        stage_queries = self.stage_queries.weight.unsqueeze(0).expand(
+            input_embeddings.shape[0], -1, -1
+        )
+        return self._replace_input_embeddings(input_embeddings, stage_mask, stage_queries)
+
     def _build_multimodal_attention(self, input_embeddings, projected_patch_embeddings, attention_mask):
         """Build multimodal embeddings and attention mask"""
         # Update attention mask
@@ -678,7 +693,7 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
                 input_embeddings = self._replace_input_embeddings(
                     input_embeddings, all_actions_mask, action_queries)
 
-            input_embeddings, attention_mask = self._insert_stage_queries(input_embeddings, attention_mask, labels)
+            input_embeddings = self._replace_stage_embeddings(input_embeddings, input_ids)
 
             # Build multimodal embeddings & attention mask
             multimodal_embeddings, multimodal_attention_mask = self._build_multimodal_attention(
@@ -865,6 +880,7 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
         action_head=None,
         proprio=None,
         proprio_projector=None,
+        input_ids=None,
     ):
         """Run L1 regression-based continuous action prediction or discrete action tokens prediction."""
 
@@ -872,7 +888,10 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
         action_queries = action_queries.view(1, action_queries.shape[0], action_queries.shape[1]).repeat(input_embeddings.shape[0], 1, 1)  # (b, chunk_size, h)
         # Replace action token embeddings with noisy action embeddings
         input_embeddings = self._replace_input_embeddings(input_embeddings.clone(), all_actions_mask, action_queries)
-        input_embeddings, attention_mask = self._insert_stage_queries(input_embeddings, attention_mask, labels)
+        if input_ids is not None:
+            input_embeddings = self._replace_stage_embeddings(input_embeddings, input_ids)
+        else:
+            input_embeddings, attention_mask = self._insert_stage_queries(input_embeddings, attention_mask, labels)
 
         # Build multimodal embeddings and attention mask
         multimodal_embeddings, multimodal_attention_mask = self._build_multimodal_attention(
@@ -1014,6 +1033,7 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
             action_head=action_head,
             proprio=proprio, # [14: left-arm-7, right-arm-7]
             proprio_projector=proprio_projector,
+            input_ids=input_ids,
             )
            
         # Unnormalize predicted actions

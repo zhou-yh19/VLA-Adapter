@@ -5,7 +5,6 @@ Fine-tunes Qwen2.5-0.5B via LoRA.
 """
 
 import os
-import time
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
@@ -36,17 +35,9 @@ from prismatic.extern.hf.configuration_prismatic import OpenVLAConfig
 from prismatic.extern.hf.modeling_prismatic import OpenVLAForActionPrediction
 from prismatic.extern.hf.processing_prismatic import PrismaticImageProcessor, PrismaticProcessor
 from prismatic.models.action_heads import L1RegressionActionHead
-from prismatic.models.backbones.llm.prompting import PurePromptBuilder
 from prismatic.models.film_vit_wrapper import FiLMedPrismaticVisionBackbone
 from prismatic.models.projectors import ProprioProjector
-from prismatic.training.train_utils import (
-    compute_actions_l1_loss,
-    compute_token_accuracy,
-    get_current_action_mask,
-    get_next_actions_mask
-)
 from prismatic.util.data_utils import PaddedCollatorForActionPrediction
-from prismatic.vla.action_tokenizer import ActionTokenizer
 from prismatic.vla.constants import (
     ACTION_DIM,
     ACTION_PROPRIO_NORMALIZATION_TYPE,
@@ -56,10 +47,10 @@ from prismatic.vla.constants import (
     NUM_STAGES,
     NUM_TOKENS
 )
-from prismatic.vla.datasets import RLDSDataset, RLDSBatchTransform
+from prismatic.vla.datasets import RLDSDataset, RLDSBatchTransform4VLAAdapterStage
 from prismatic.vla.datasets.rlds.utils.data_utils import save_dataset_statistics
 from prismatic.models import load, load_vla
-from stage_classifier import StageClassifier_0
+from stage_classifier import StageClassifier_1
 
 
 
@@ -72,7 +63,9 @@ class FinetuneConfig:
     config_file_path: str = "pretrained_models/configs"     # Path to necessary config files of LA-Adapter
     vlm_path: str = "pretrained_models/prism-qwen25-extra-dinosiglip-224px-0_5b"             # Path to OpenVLA model (on HuggingFace Hub or stored locally)
     use_minivlm: bool = True                        # 
-    resum_vla_path: str = "openvla/openvla-7b"       # Path to OpenVLA model (on HuggingFace Hub or stored locally)
+    resum_vla_path: str = "outputs/adapter_stage_4--20000_chkpt"  # Path to checkpoint directory for resuming, 
+                                                                  # default: openvla/openvla-7b
+                                                                  # example: outputs/adapter_stage_4--20000_chkpt
 
     # Dataset
     data_root_dir: Path = Path("organize_desk_datasets")      # Directory containing RLDS datasets
@@ -93,17 +86,17 @@ class FinetuneConfig:
     batch_size: int = 8                              # Batch size per device (total batch size = batch_size * num GPUs) - Reduced from 64 to avoid OOM
     learning_rate: float = 2e-4                      # Learning rate
     lr_warmup_steps: int = 0.1                       # Number of steps to warm up learning rate (from 10% to 100%)
-    num_steps_before_decay: int = 30000             # Number of steps before LR decays by 10x
+    num_steps_before_decay: int = 70000             # Number of steps before LR decays by 10x
     grad_accumulation_steps: int = 1                 # Number of gradient accumulation steps - Increased to maintain effective batch size (16*4=64)
-    max_steps: int = 20000                          # Max number of training steps
+    max_steps: int = 30000                          # Max number of training steps
     use_val_set: bool = False                        # If True, uses validation set and log validation metrics
     val_freq: int = 10_000                           # (When `use_val_set==True`) Validation set logging frequency in steps
     val_time_limit: int = 180                        # (When `use_val_set==True`) Time limit for computing validation metrics
     save_freq: int = 5000                          # Checkpoint saving frequency in steps
     save_latest_checkpoint_only: bool = False        # If True, saves only 1 checkpoint, overwriting latest checkpoint
                                                      #   (If False, saves all checkpoints)
-    resume: bool = False                             # If True, resumes from checkpoint
-    resume_step: Optional[int] = None                # (When `resume==True`) Step number that we are resuming from
+    resume: bool = True                             # If True, resumes from checkpoint
+    resume_step: Optional[int] = 20000                # (When `resume==True`) Step number that we are resuming from
     image_aug: bool = True                           # If True, trains with image augmentations (HIGHLY RECOMMENDED)
     diffusion_sample_freq: int = 50                  # (When `use_diffusion==True`) Frequency for sampling in steps
 
@@ -121,7 +114,7 @@ class FinetuneConfig:
     # Logging
     wandb_entity: str = "shihaoran99"          # Name of WandB entity
     wandb_project: str = "vla-adapter-stage"        # Name of WandB project
-    wandb_run_id: str = "adapter_stage_3"        # Name of WandB run
+    wandb_run_id: str = "adapter_stage_4"        # Name of WandB run
     run_id_note: Optional[str] = None                # Extra note to add to end of run ID for logging
     run_id_override: Optional[str] = None            # Optional string to override the run ID with
     wandb_log_freq: int = 1                         # WandB logging frequency in steps
@@ -259,47 +252,17 @@ def run_forward_pass(
     action_head,
     proprio_projector,
     batch,
-    action_tokenizer,
     device_id,
-    use_l1_regression,
     use_proprio,
     use_film,
     num_patches,
-    compute_diffusion_l1=False,
-    use_pro_version=True,
     cfg=None,
     stage_classifier=None,
 ) -> Tuple[torch.Tensor, Dict[str, float]]:
-    """
-    Compute model forward pass and metrics for both training and validation.
-
-    Args:
-        vla (OpenVLAForActionPrediction): Vision-language-action policy.
-        action_head (nn.Module): Action head module.
-        noisy_action_projector (nn.Module): Noisy action projector module (only used for diffusion).
-        proprio_projector (nn.Module): Proprioceptive state projector module.
-        batch (dict): Input batch.
-        action_tokenizer (ActionTokenizer): Action tokenizer.
-        device_id (str): Device ID.
-        use_l1_regression (bool): Whether to use L1 regression.
-        use_diffusion (bool): Whether to use diffusion.
-        use_proprio (bool): Whether to use proprioceptive state as input.
-        use_film (bool): Whether to use FiLM for better language following.
-        num_patches (int): Number of vision patches.
-        compute_diffusion_l1 (bool): Whether to sample actions and compute L1 loss for diffusion (do this once every
-                                    diffusion_sample_freq steps during training; do it every batch for validation)
-        num_diffusion_steps (int): Number of diffusion steps (only used for diffusion).
-
-    Returns:
-        tuple: (loss, metrics_dict)
-            loss: The loss tensor with gradient for backpropagation.
-            metrics_dict: Dictionary of computed metrics (detached values for logging).
-    """
+    """Compute L1 regression forward pass and metrics."""
     metrics = {}
 
-    # Get ground-truth action labels
     ground_truth_actions = batch["actions"].to(device_id).to(torch.bfloat16)
-    noise, noisy_actions, diffusion_timestep_embeddings = None, None, None
 
     # VLA forward pass
     with torch.autocast("cuda", dtype=torch.bfloat16):
@@ -317,117 +280,63 @@ def run_forward_pass(
             use_film=use_film,
             )
 
-    # Get action masks (only needed for discrete next-token prediction path)
-    ground_truth_token_ids = batch["labels"][:,1:].to(device_id)
-    current_action_mask = get_current_action_mask(ground_truth_token_ids)
-    next_actions_mask = get_next_actions_mask(ground_truth_token_ids)
+    # Extract hidden states for L1 regression
+    # New sequence order: [BOS, patch(P), high_level, stage(8), low_level, action(64)]
+    batch_size = batch["input_ids"].shape[0]
+    multi_layer_hidden_states = []
+    for item in output.hidden_states[0:]:
+        patch_states = item[:, :num_patches].reshape(batch_size, 1, num_patches, -1)
+        action_states = item[:, -NUM_TOKENS:].reshape(batch_size, 1, NUM_TOKENS, -1).to(torch.bfloat16)
+        multi_layer_hidden_states.append(torch.cat((patch_states, action_states), dim=2))
+    multi_layer_hidden_states = torch.cat(multi_layer_hidden_states, dim=1)
 
-    # Compute metrics for discrete action representation (next-token prediction)
-    if not (use_l1_regression):
-        loss = output.loss
-        predicted_token_ids = output.logits[:, num_patches:-1].argmax(dim=2)
+    predicted_actions = action_head.module.predict_action(
+        multi_layer_hidden_states,
+        proprio=batch["proprio"] if use_proprio else None,
+        proprio_projector=proprio_projector if use_proprio else None,
+        phase=cfg.phase,
+        )
 
-        curr_action_accuracy = compute_token_accuracy(
-            predicted_token_ids, 
-            ground_truth_token_ids, 
-            mask=current_action_mask
-            )
-        curr_action_l1_loss = compute_actions_l1_loss(
-            action_tokenizer, 
-            predicted_token_ids, 
-            ground_truth_token_ids, 
-            mask=current_action_mask
-            )
-        next_actions_accuracy = compute_token_accuracy(
-            predicted_token_ids, 
-            ground_truth_token_ids, 
-            mask=next_actions_mask
-            )
-        next_actions_l1_loss = compute_actions_l1_loss(
-            action_tokenizer, 
-            predicted_token_ids, 
-            ground_truth_token_ids, 
-            mask=next_actions_mask
-            )
-        
+    loss1 = torch.nn.L1Loss()(predicted_actions, ground_truth_actions)
+
+    # Stage classification — extract stage hidden states via stage_start_idx
+    if "stage" in batch and "stage_start_idx" in batch:
+        last_layer = output.hidden_states[-1]
+        stage_offset = batch["stage_start_idx"].to(device_id)
+        stage_pos = stage_offset + num_patches  # vision patches are inserted after BOS
+        stage_hiddens = []
+        for i in range(batch_size):
+            s = stage_pos[i].item()
+            stage_hiddens.append(last_layer[i, s : s + NUM_STAGES, :])
+        stage_hidden = torch.stack(stage_hiddens)
+
+        stage_logits = stage_classifier.module(stage_hidden.float())
+        stage_labels = batch["stage"].long().to(device_id)
+        loss2 = F.cross_entropy(stage_logits, stage_labels)
+        loss = loss1 + cfg.loss_lambda * loss2
         metrics.update(
             {
-                "loss_value": loss.item(),  # Detached value for logging
-                "curr_action_accuracy": curr_action_accuracy.item(),
-                "curr_action_l1_loss": curr_action_l1_loss.item(),
-                "next_actions_accuracy": next_actions_accuracy.item(),
-                "next_actions_l1_loss": next_actions_l1_loss.item(),
-                }
-            )
-        
-    # Compute metrics for continuous action representations (L1 regression)
+                "loss_value": loss.item(),
+                "loss1_action": loss1.item(),
+                "loss2_stage": loss2.item(),
+            }
+        )
     else:
-        batch_size = batch["input_ids"].shape[0]
-        multi_layer_hidden_states = []
-        for item in output.hidden_states[0:]:
-            # item 是逐层提取的，LLM有多少层，item就有多少个
-            # 一个 item：一个 Tensor，shape (B, seq_len, D)，表示这一层上、batch_size 条样本、整段序列的 hidden states
-            # Sequence order: [BOS, patch(768), language, stage(8), action(64), stop] → split out patch + action
-            patch_states = item[:, :num_patches].reshape(batch_size, 1, num_patches, -1)
-            action_states = item[:, -(NUM_TOKENS + 1):-1].reshape(batch_size, 1, NUM_TOKENS, -1).to(torch.bfloat16)
-            multi_layer_hidden_states.append(torch.cat((patch_states, action_states), dim=2))
-        multi_layer_hidden_states = torch.cat(multi_layer_hidden_states, dim=1)
+        loss = loss1
+        metrics.update({"loss_value": loss.item()})
 
-        predicted_actions = action_head.module.predict_action(
-            multi_layer_hidden_states,
-            proprio=batch["proprio"] if use_proprio else None,
-            proprio_projector=proprio_projector if use_proprio else None,
-            phase=cfg.phase,
-            )
+    # Detailed L1 losses for logging
+    ground_truth_curr_action = ground_truth_actions[:, 0]
+    predicted_curr_action = predicted_actions[:, 0]
+    ground_truth_next_actions = ground_truth_actions[:, 1:]
+    predicted_next_actions = predicted_actions[:, 1:]
+    metrics.update(
+        {
+            "curr_action_l1_loss": torch.nn.L1Loss()(ground_truth_curr_action, predicted_curr_action).item(),
+            "next_actions_l1_loss": torch.nn.L1Loss()(ground_truth_next_actions, predicted_next_actions).item(),
+        }
+    )
 
-        loss1 = torch.nn.L1Loss()(predicted_actions, ground_truth_actions)
-
-        # Stage classification: softmax[W @ stage^T @ w + b], input 8 tokens (B,8,896), output 4 logits
-        # loss2 backprops through stage_hidden -> output.hidden_states[-1] -> LLM
-        if  "stage" in batch:
-            last_layer = output.hidden_states[-1]  # (B, seq_len, D), part of VLA graph
-            stage_hidden = last_layer[:, -(NUM_TOKENS + 1 + NUM_STAGES) : -(NUM_TOKENS + 1), :]  # (B, 8, D)
-            stage_logits = stage_classifier.module(stage_hidden.float())  # (B, 4)
-            stage_labels = batch["stage"].long().to(device_id)  # (B,), values in [0,1,2,3]
-            loss2 = F.cross_entropy(stage_logits, stage_labels)
-            # loss2 = nn.CrossEntropyLoss(label_smoothing=0.1)(stage_logits, stage_labels)
-            loss = loss1 + cfg.loss_lambda * loss2  # backward on loss updates both action head and LLM (via loss2)
-            metrics.update(
-                {
-                    "loss_value": loss.item(),
-                    "loss1_action": loss1.item(),
-                    "loss2_stage": loss2.item(),
-                }
-            )
-        else:
-            loss = loss1
-            metrics.update(
-                {
-                    "loss_value": loss.item(),
-                }
-            )
-
-        # Get detailed L1 losses for logging
-        should_log_l1_loss = use_l1_regression
-        if should_log_l1_loss:
-            ground_truth_curr_action = ground_truth_actions[:, 0]
-            predicted_curr_action = predicted_actions[:, 0]
-            ground_truth_next_actions = ground_truth_actions[:, 1:]
-            predicted_next_actions = predicted_actions[:, 1:]
-            curr_action_l1_loss = torch.nn.L1Loss()(ground_truth_curr_action, predicted_curr_action)
-            next_actions_l1_loss = torch.nn.L1Loss()(ground_truth_next_actions, predicted_next_actions)
-            if compute_diffusion_l1:
-                print('curr: ',curr_action_l1_loss.item())
-                # print('next: ',next_actions_l1_loss.item())
-
-            metrics.update(
-                {
-                    "curr_action_l1_loss": curr_action_l1_loss.item(),
-                    "next_actions_l1_loss": next_actions_l1_loss.item(),
-                }
-            )
-
-    # Return both the loss tensor (with gradients) and the metrics dictionary (with detached values)
     return loss, metrics
 
 
@@ -590,90 +499,6 @@ def save_training_checkpoint(
 
 
 
-def run_validation(
-    vla,
-    action_head,
-    noisy_action_projector,
-    proprio_projector,
-    val_dataloader,
-    action_tokenizer,
-    device_id,
-    cfg,
-    num_patches,
-    log_step,
-    distributed_state,
-    val_time_limit,
-) -> None:
-    """
-    Compute validation set metrics for logging.
-
-    Args:
-        vla (OpenVLAForActionPrediction): Vision-language-action policy.
-        action_head (nn.Module): Action head module.
-        noisy_action_projector (nn.Module): Noisy action projector module (only used for diffusion).
-        proprio_projector (nn.Module): Proprioceptive state projector module.
-        val_dataloader (DataLoader): Validation data loader.
-        action_tokenizer (ActionTokenizer): Action tokenizer.
-        device_id (str): Device ID.
-        cfg (FinetuneConfig): Training configuration.
-        num_patches (int): Number of vision patches.
-        log_step (int): Current logging step.
-        distributed_state (PartialState): Distributed training state.
-        val_time_limit (int): Time limit for computing validation metrics.
-
-    Returns:
-        None.
-    """
-    val_start_time = time.time()
-    vla.eval()
-    val_batches_count = 0
-
-    # List to store validation metrics
-    all_val_metrics = []
-
-    with torch.no_grad():
-        for batch in val_dataloader:
-            # Always compute L1 loss for validation, even for diffusion
-            _, metrics = run_forward_pass(
-                vla=vla,
-                action_head=action_head,
-                proprio_projector=proprio_projector,
-                batch=batch,
-                action_tokenizer=action_tokenizer,
-                device_id=device_id,
-                use_l1_regression=cfg.use_l1_regression,
-                use_proprio=cfg.use_proprio,
-                use_film=cfg.use_film,
-                num_patches=num_patches,
-                compute_diffusion_l1=True,
-                use_pro_version=cfg.use_pro_version
-            )
-
-            # Add the loss value to the metrics
-            metrics["loss"] = metrics["loss_value"]
-            all_val_metrics.append(metrics)
-            val_batches_count += 1
-
-            # Cut testing on validation set short if it exceeds time limit
-            if time.time() - val_start_time > val_time_limit:
-                break
-
-    # Compute average validation metrics
-    avg_val_metrics = {}
-    for metric_name in all_val_metrics[0].keys():
-        values = [metrics[metric_name] for metrics in all_val_metrics if metric_name in metrics]
-        if values:
-            avg_val_metrics[metric_name] = sum(values) / len(values)
-
-    # Add batch count to metrics
-    avg_val_metrics["val_batches_count"] = val_batches_count
-
-    # Log validation metrics to W&B
-    if distributed_state.is_main_process:
-        log_metrics_to_wandb(avg_val_metrics, "VLA Val", log_step, wandb)
-
-
-
 @draccus.wrap()
 def finetune(cfg: FinetuneConfig) -> None:
     """
@@ -818,14 +643,19 @@ def finetune(cfg: FinetuneConfig) -> None:
     # vla.set_version(cfg.version)
 
     if cfg.use_lora:
-        lora_config = LoraConfig(
-            r=cfg.lora_rank,
-            lora_alpha= 2 * cfg.lora_rank,
-            lora_dropout=cfg.lora_dropout,
-            target_modules="all-linear",
-            init_lora_weights="gaussian",
-        )
-        vla = get_peft_model(vla, lora_config)
+        if cfg.resume:
+            adapter_dir = os.path.join(cfg.resum_vla_path, "lora_adapter")
+            print(f"Resuming LoRA adapter from: {adapter_dir}")
+            vla = PeftModel.from_pretrained(vla, adapter_dir, is_trainable=True)
+        else:
+            lora_config = LoraConfig(
+                r=cfg.lora_rank,
+                lora_alpha= 2 * cfg.lora_rank,
+                lora_dropout=cfg.lora_dropout,
+                target_modules="all-linear",
+                init_lora_weights="gaussian",
+            )
+            vla = get_peft_model(vla, lora_config)
         for name, param in vla.named_parameters():
             if "action_queries" in name or "stage_queries" in name:
                 param.requires_grad = True
@@ -888,14 +718,17 @@ def finetune(cfg: FinetuneConfig) -> None:
     # If we have proprio inputs, a single proprio embedding is appended to the end of the vision patch embeddings
 
     # Stage classifier: softmax[W@stage^T@w+b], input (B,8,llm_dim), output (B,4); gradient flows to LLM
-    stage_classifier = wrap_ddp(
-        StageClassifier_0(
-            llm_dim=vla.module.llm_dim,
-            num_stage_classes=NUM_STAGE_CLASSES,
-            num_stage_tokens=NUM_STAGES,
-        ).to(device_id),
+    stage_classifier = init_module(
+        StageClassifier_1,
+        "stage_classifier",
+        cfg,
         device_id,
-        find_unused=False,
+        {
+            "llm_dim": vla.module.llm_dim,
+            "num_stage_classes": NUM_STAGE_CLASSES,
+            # "num_stage_tokens": NUM_STAGES,
+        },
+        find_unused_params=False,
     )
 
     # Instantiate optimizer
@@ -926,37 +759,15 @@ def finetune(cfg: FinetuneConfig) -> None:
     #         eta_min=0.0001,          
     #         )
 
-    # Create Action Tokenizer
-    action_tokenizer = ActionTokenizer(processor.tokenizer)
-
-    # Load Fine-tuning Dataset =>> note that we use an RLDS-formatted dataset following Open X-Embodiment by default.
-    #   =>> If you want to use a non-RLDS dataset (e.g., a standard PyTorch Dataset) see the following commented block.
-    #   =>> Note that our training code does not loop over epochs because the RLDS loader does this implicitly; if using
-    #       your own Dataset, make sure to add the appropriate logic to the training loop!
-    #
-    # ---
-    # from prismatic.vla.datasets import DummyDataset
-    #
-    # train_dataset = DummyDataset(
-    #     action_tokenizer,
-    #     processor.tokenizer,
-    #     image_transform=processor.image_processor.apply_transform,
-    #     prompt_builder_fn=PurePromptBuilder,
-    # )
-    # ---
-
     # We assume that the model takes as input one third-person camera image and 1 or 2 optional wrist camera image(s)
     use_wrist_image = cfg.num_images_in_input > 1
 
-    # Create training and optional validation datasets
-    batch_transform = RLDSBatchTransform(
-        action_tokenizer,
-        processor.tokenizer,
+    # Create training dataset
+    batch_transform = RLDSBatchTransform4VLAAdapterStage(
+        base_tokenizer=processor.tokenizer,
         image_transform=processor.image_processor.apply_transform,
-        prompt_builder_fn=PurePromptBuilder,
         use_wrist_image=use_wrist_image,
         use_proprio=cfg.use_proprio,
-        use_minivlm=cfg.use_minivlm
         )
     train_dataset = RLDSDataset(
         cfg.data_root_dir,
@@ -966,16 +777,6 @@ def finetune(cfg: FinetuneConfig) -> None:
         shuffle_buffer_size=cfg.shuffle_buffer_size,
         image_aug=cfg.image_aug,
     )
-    if cfg.use_val_set:
-        val_dataset = RLDSDataset(
-            cfg.data_root_dir,
-            cfg.dataset_name,
-            batch_transform,
-            resize_resolution=tuple(vla.module.config.image_sizes),
-            shuffle_buffer_size=cfg.shuffle_buffer_size // 10,
-            image_aug=cfg.image_aug,
-            train=False,
-        )
 
     # [Important] Save dataset statistics so that we can unnormalize actions during inference
     if distributed_state.is_main_process:
@@ -993,15 +794,6 @@ def finetune(cfg: FinetuneConfig) -> None:
         num_workers=0,  # Important: Set to 0 if using RLDS, which uses its own parallelism
     )
     print('Len of dataloader: ', len(dataloader))
-    if cfg.use_val_set:
-        val_batch_size = cfg.batch_size
-        val_dataloader = DataLoader(
-            val_dataset,
-            batch_size=val_batch_size,
-            sampler=None,
-            collate_fn=collator,
-            num_workers=0,  # Important: Set to 0 if using RLDS, which uses its own parallelism
-        )
 
     # Deque to store recent train metrics (used for computing smoothened metrics for gradient accumulation)
     recent_metrics = {
@@ -1033,20 +825,15 @@ def finetune(cfg: FinetuneConfig) -> None:
                         print(f"  {k}: {type(v).__name__} = {v}")
 
             # Compute training metrics and loss
-            compute_diffusion_l1 = (cfg.use_l1_regression and batch_idx % cfg.diffusion_sample_freq == 0) or (cfg.use_diffusion and batch_idx % cfg.diffusion_sample_freq == 0)
             loss, metrics = run_forward_pass(
                 vla=vla,
                 action_head=action_head,
                 proprio_projector=proprio_projector if cfg.use_proprio else None,
                 batch=batch,
-                action_tokenizer=action_tokenizer,
                 device_id=device_id,
-                use_l1_regression=cfg.use_l1_regression,
                 use_proprio=cfg.use_proprio,
                 use_film=cfg.use_film,
                 num_patches=NUM_PATCHES,
-                compute_diffusion_l1=compute_diffusion_l1,
-                use_pro_version=cfg.use_pro_version,
                 cfg=cfg,
                 stage_classifier=stage_classifier,
             )
@@ -1113,25 +900,6 @@ def finetune(cfg: FinetuneConfig) -> None:
                     new_state_dict=RAW_STATE_DICT,
                     stage_classifier=stage_classifier,
                 )
-
-            # Test model on validation set
-            if cfg.use_val_set and log_step > 0 and log_step % cfg.val_freq == 0:
-                run_validation(
-                    vla=vla,
-                    action_head=action_head,
-                    noisy_action_projector=None,
-                    proprio_projector=proprio_projector if cfg.use_proprio else None,
-                    val_dataloader=val_dataloader,
-                    action_tokenizer=action_tokenizer,
-                    device_id=device_id,
-                    cfg=cfg,
-                    num_patches=NUM_PATCHES,
-                    log_step=log_step,
-                    distributed_state=distributed_state,
-                    val_time_limit=cfg.val_time_limit,
-                )
-                # Set model back to training mode after validation
-                vla.train()
 
             # Stop training when max_steps is reached
             if log_step == cfg.max_steps:
