@@ -132,6 +132,7 @@ class RLDSBatchTransform:
     use_wrist_image: bool = False
     use_proprio: bool = False
     use_minivlm: bool = False
+    use_high_level_task_only: bool = False
 
 
     def __call__(self, rlds_batch: Dict[str, Any]) -> Dict[str, Any]:
@@ -145,8 +146,16 @@ class RLDSBatchTransform:
         # CrossEntropy 要求类别下标为 0~num_classes-1，故存 0-indexed（0,1,2,3），不能存 1~4
         stage_raw = extract_last_number(lang)
         stage_class_index = (stage_raw - 1) if (stage_raw is not None and 1 <= stage_raw <= 4) else None
-        # 做 stage 预测时：prompt 中不包含 "Current task"，只保留已完成任务，迫使模型依赖视觉+语言预测当前任务
-        lang_for_prompt = add_task_description_suffix(lang) if stage_class_index is not None else lang
+        
+        if self.use_high_level_task_only:
+            if stage_class_index is not None:
+                high_level_task, _ = get_task_description(lang)
+                lang_for_prompt = high_level_task
+            else:
+                lang_for_prompt = lang
+        else:
+            # 做 stage 预测时：prompt 中不包含 "Current task"，只保留已完成任务，迫使模型依赖视觉+语言预测当前任务
+            lang_for_prompt = add_task_description_suffix(lang) if stage_class_index is not None else lang
 
         # Construct Chat-based Prompt =>> Input is default query + language instruction, output are the action tokens
         prompt_builder = self.prompt_builder_fn("openvla")
@@ -304,10 +313,7 @@ class RLDSBatchTransform4VLAAdapterStage:
 
         # --- Encode low-level prompt (no special tokens to avoid duplicate BOS) ---
         low_level_text = low_level_task.lower()+"<|im_end|>\n"
-        if low_level_text:
-            low_ids = self.base_tokenizer(low_level_text, add_special_tokens=False).input_ids
-        else:
-            low_ids = []
+        low_ids = self.base_tokenizer(low_level_text, add_special_tokens=False).input_ids
 
         # --- Action placeholders (replaced by action_queries in model forward) ---
         action_ids = [_ACTION_PLACEHOLDER_ID] * NUM_TOKENS
@@ -322,8 +328,8 @@ class RLDSBatchTransform4VLAAdapterStage:
         labels = torch.tensor(labels)
         pixel_values = self.image_transform(img)
 
-        # --- Mask labels: only keep last (NUM_TOKENS + 1) for _process_action_masks ---
-        labels[: -(NUM_TOKENS + 1)] = IGNORE_INDEX
+        # --- Mask labels: only supervise the 64 action placeholders ---
+        labels[:-NUM_TOKENS] = IGNORE_INDEX
 
         # --- Assemble return dict ---
         return_dict = dict(

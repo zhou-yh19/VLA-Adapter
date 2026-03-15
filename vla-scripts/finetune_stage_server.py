@@ -41,6 +41,7 @@ from prismatic.util.data_utils import PaddedCollatorForActionPrediction
 from prismatic.vla.constants import (
     ACTION_DIM,
     ACTION_PROPRIO_NORMALIZATION_TYPE,
+    IGNORE_INDEX,
     NUM_ACTIONS_CHUNK,
     NUM_STAGE_CLASSES,
     PROPRIO_DIM,
@@ -63,7 +64,7 @@ class FinetuneConfig:
     config_file_path: str = "pretrained_models/configs"     # Path to necessary config files of LA-Adapter
     vlm_path: str = "pretrained_models/prism-qwen25-extra-dinosiglip-224px-0_5b"             # Path to OpenVLA model (on HuggingFace Hub or stored locally)
     use_minivlm: bool = True                        # 
-    resum_vla_path: str = "outputs/adapter_stage_4--20000_chkpt"  # Path to checkpoint directory for resuming, 
+    resum_vla_path: str = "openvla/openvla-7b"  # Path to checkpoint directory for resuming, 
                                                                   # default: openvla/openvla-7b
                                                                   # example: outputs/adapter_stage_4--20000_chkpt
 
@@ -85,8 +86,8 @@ class FinetuneConfig:
     # Training configuration
     batch_size: int = 8                              # Batch size per device (total batch size = batch_size * num GPUs) - Reduced from 64 to avoid OOM
     learning_rate: float = 2e-4                      # Learning rate
-    lr_warmup_steps: int = 0.1                       # Number of steps to warm up learning rate (from 10% to 100%)
-    num_steps_before_decay: int = 70000             # Number of steps before LR decays by 10x
+    lr_warmup_steps: int = 1000                       # Number of steps to warm up learning rate (from 10% to 100%)
+    num_steps_before_decay: int = 90000             # Number of steps before LR decays by 10x
     grad_accumulation_steps: int = 1                 # Number of gradient accumulation steps - Increased to maintain effective batch size (16*4=64)
     max_steps: int = 30000                          # Max number of training steps
     use_val_set: bool = False                        # If True, uses validation set and log validation metrics
@@ -95,13 +96,13 @@ class FinetuneConfig:
     save_freq: int = 5000                          # Checkpoint saving frequency in steps
     save_latest_checkpoint_only: bool = False        # If True, saves only 1 checkpoint, overwriting latest checkpoint
                                                      #   (If False, saves all checkpoints)
-    resume: bool = True                             # If True, resumes from checkpoint
-    resume_step: Optional[int] = 20000                # (When `resume==True`) Step number that we are resuming from
+    resume: bool = False                             # If True, resumes from checkpoint
+    resume_step: Optional[int] = None                # (When `resume==True`) Step number that we are resuming from
     image_aug: bool = True                           # If True, trains with image augmentations (HIGHLY RECOMMENDED)
     diffusion_sample_freq: int = 50                  # (When `use_diffusion==True`) Frequency for sampling in steps
 
     # LoRA
-    use_lora: bool = True                          # If True, uses LoRA fine-tuning
+    use_lora: bool = False                          # If True, uses LoRA fine-tuning
     lora_rank: int = 64                              # Rank of LoRA weight matrix
     lora_dropout: float = 0.0                        # Dropout applied to LoRA weights
     merge_lora_during_training: bool = True         # If True, merges LoRA weights and saves result during training
@@ -109,12 +110,12 @@ class FinetuneConfig:
                                                      #         False and merge final checkpoint offline!
 
     # Full Finetune
-    use_fz: bool = False                             # If True, uses LoRA fine-tuning
+    use_fz: bool = True                             # If True, uses LoRA fine-tuning
 
     # Logging
     wandb_entity: str = "shihaoran99"          # Name of WandB entity
     wandb_project: str = "vla-adapter-stage"        # Name of WandB project
-    wandb_run_id: str = "adapter_stage_4"        # Name of WandB run
+    wandb_run_id: str = "adapter_stage_7"        # Name of WandB run
     run_id_note: Optional[str] = None                # Extra note to add to end of run ID for logging
     run_id_override: Optional[str] = None            # Optional string to override the run ID with
     wandb_log_freq: int = 1                         # WandB logging frequency in steps
@@ -126,6 +127,10 @@ class FinetuneConfig:
 
     # loss lambda
     loss_lambda: float = 0.1
+
+    # hidden states mode
+    use_full_hidden_states: bool = False  # If True, action_head reads ALL tokens from hidden_states;
+                                          # If False, only patch + action tokens (original behavior)
 
 
 def remove_ddp_in_checkpoint(state_dict) -> dict:
@@ -283,12 +288,27 @@ def run_forward_pass(
     # Extract hidden states for L1 regression
     # New sequence order: [BOS, patch(P), high_level, stage(8), low_level, action(64)]
     batch_size = batch["input_ids"].shape[0]
-    multi_layer_hidden_states = []
-    for item in output.hidden_states[0:]:
-        patch_states = item[:, :num_patches].reshape(batch_size, 1, num_patches, -1)
-        action_states = item[:, -NUM_TOKENS:].reshape(batch_size, 1, NUM_TOKENS, -1).to(torch.bfloat16)
-        multi_layer_hidden_states.append(torch.cat((patch_states, action_states), dim=2))
-    multi_layer_hidden_states = torch.cat(multi_layer_hidden_states, dim=1)
+
+    if cfg.use_full_hidden_states:
+        # Full mode: feed ALL tokens (BOS + patches + text + stage + action) to action_head
+        multi_layer_hidden_states = []
+        for item in output.hidden_states[0:]:
+            all_states = item.reshape(batch_size, 1, -1, item.shape[-1]).to(torch.bfloat16)
+            multi_layer_hidden_states.append(all_states)
+        multi_layer_hidden_states = torch.cat(multi_layer_hidden_states, dim=1)
+        action_head.module.num_task_tokens = multi_layer_hidden_states.shape[2] - NUM_TOKENS
+    else:
+        # Original mode: only patch + action tokens
+        # Use labels to build a boolean mask that precisely locates the 64 action
+        # placeholders in each sample, immune to right-padding across the batch.
+        action_mask = batch["labels"].to(device_id) != IGNORE_INDEX  # (B, padded_input_len)
+        multi_layer_hidden_states = []
+        for item in output.hidden_states[0:]:
+            patch_states = item[:, :num_patches].reshape(batch_size, 1, num_patches, -1)
+            text_states = item[:, num_patches:]  # (B, padded_input_len, D)
+            action_states = text_states[action_mask].reshape(batch_size, 1, NUM_TOKENS, -1).to(torch.bfloat16)
+            multi_layer_hidden_states.append(torch.cat((patch_states, action_states), dim=2))
+        multi_layer_hidden_states = torch.cat(multi_layer_hidden_states, dim=1)
 
     predicted_actions = action_head.module.predict_action(
         multi_layer_hidden_states,
@@ -800,10 +820,6 @@ def finetune(cfg: FinetuneConfig) -> None:
         "loss_value": deque(maxlen=cfg.grad_accumulation_steps),
         "loss1_action": deque(maxlen=cfg.grad_accumulation_steps),
         "loss2_stage": deque(maxlen=cfg.grad_accumulation_steps),
-        # "curr_action_accuracy": deque(maxlen=cfg.grad_accumulation_steps),
-        # "curr_action_l1_loss": deque(maxlen=cfg.grad_accumulation_steps),
-        # "next_actions_accuracy": deque(maxlen=cfg.grad_accumulation_steps),
-        # "next_actions_l1_loss": deque(maxlen=cfg.grad_accumulation_steps),
     }
 
     # Start training
