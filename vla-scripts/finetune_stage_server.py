@@ -89,7 +89,7 @@ class FinetuneConfig:
     lr_warmup_steps: int = 1000                       # Number of steps to warm up learning rate (from 10% to 100%)
     num_steps_before_decay: int = 90000             # Number of steps before LR decays by 10x
     grad_accumulation_steps: int = 1                 # Number of gradient accumulation steps - Increased to maintain effective batch size (16*4=64)
-    max_steps: int = 30000                          # Max number of training steps
+    max_steps: int = 60000                          # Max number of training steps
     use_val_set: bool = False                        # If True, uses validation set and log validation metrics
     val_freq: int = 10_000                           # (When `use_val_set==True`) Validation set logging frequency in steps
     val_time_limit: int = 180                        # (When `use_val_set==True`) Time limit for computing validation metrics
@@ -115,7 +115,7 @@ class FinetuneConfig:
     # Logging
     wandb_entity: str = "shihaoran99"          # Name of WandB entity
     wandb_project: str = "vla-adapter-stage"        # Name of WandB project
-    wandb_run_id: str = "adapter_stage_7"        # Name of WandB run
+    wandb_run_id: str = "adapter_stage_8"        # Name of WandB run
     run_id_note: Optional[str] = None                # Extra note to add to end of run ID for logging
     run_id_override: Optional[str] = None            # Optional string to override the run ID with
     wandb_log_freq: int = 1                         # WandB logging frequency in steps

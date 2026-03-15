@@ -312,8 +312,8 @@ class RLDSBatchTransform4VLAAdapterStage:
         stage_ids = [STAGE_PLACEHOLDER_ID] * NUM_STAGES
 
         # --- Encode low-level prompt (no special tokens to avoid duplicate BOS) ---
-        low_level_text = low_level_task.lower()+"<|im_end|>\n"
-        low_ids = self.base_tokenizer(low_level_text, add_special_tokens=False).input_ids
+        low_level_text = low_level_task.lower()
+        low_ids = self.base_tokenizer(low_level_text, add_special_tokens=False).input_ids if low_level_text else []
 
         # --- Action placeholders (replaced by action_queries in model forward) ---
         action_ids = [_ACTION_PLACEHOLDER_ID] * NUM_TOKENS
