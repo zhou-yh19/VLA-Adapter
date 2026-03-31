@@ -486,17 +486,17 @@ torchrun --standalone --nnodes 1 --nproc-per-node 8 vla-scripts/finetune_stage_s
 > logs/VLA-Adapter-Stage--teleavatar--organize_the_desk_stage.log 2>&1 &
 ```
 
-#### 常用删除训练进程命令
-查看是否还有finetune_stage_server.py进程在运行
+Please note that the obtained models will be stored in the `/outputs` folder. Each model will take up nearly `3GB` of memory, so you need to reserve enough space. We strongly recommend that you get our trained model from [VLA-Adapter HuggingFace](https://huggingface.co/VLA-Adapter) and place it in this folder for inference.
+
+#### 训练过程中常用的删除训练进程指令
+查看是否还有`finetune_stage_server.py`进程在运行
 ```bash
 ps aux | grep finetune_stage_server.py
 ```
-删除finetune_stage_server.py所有正在运行的进程
+删除`finetune_stage_server.py`所有正在运行的进程
 ```bash
 pkill -9 -f "finetune_stage_server.py"
 ```
-
-Please note that the obtained models will be stored in the `/outputs` folder. Each model will take up nearly `3GB` of memory, so you need to reserve enough space. We strongly recommend that you get our trained model from [VLA-Adapter HuggingFace](https://huggingface.co/VLA-Adapter) and place it in this folder for inference.
 
 ## :mechanical_arm: Inference
 
@@ -622,10 +622,80 @@ python experiments/robot/teleavatar/run_teleavatar_eval.py \
   --pretrained_checkpoint outputs/Teleavatar-stuffed-animal \
   > eval_logs/shihaoran--teleavatar--stuffed_animal--chkpt.log 2>&1 &
 ```
+**评估 vla-adapter-teleavatar-stage-raw**
+```bash
+startros2 && rosdomain && export CUDA_VISIBLE_DEVICES=1 && cd /home/nas/VLA-Adapter && python experiments/robot/teleavatar/run_teleavatar_parallel_load_eval.py \
+  --pretrained_checkpoint outputs/adapter_stage_raw--20000_chkpt \
+  > eval_logs/shihaoran--teleavatar--organize_the_desk_raw--chkpt.log 2>&1 &
+```
+**评估 vla-adapter-teleavatar-stage0**
+```bash
+startros2 && rosdomain && export CUDA_VISIBLE_DEVICES=1 && cd /home/nas/VLA-Adapter && python experiments/robot/teleavatar/run_teleavatar_stage_parallel_load_eval.py \
+  --pretrained_checkpoint outputs/adapter_stage_0--20000_chkpt \
+  > eval_logs/shihaoran--teleavatar--organize_the_desk_stage0--chkpt.log 2>&1 &
+```
+**评估 vla-adapter-teleavatar-stage1**
+```bash
+startros2 && rosdomain && export CUDA_VISIBLE_DEVICES=1 && cd /home/nas/VLA-Adapter && python experiments/robot/teleavatar/run_teleavatar_stage_parallel_load_eval.py \
+  --pretrained_checkpoint outputs/adapter_stage_1--20000_chkpt \
+  > eval_logs/shihaoran--teleavatar--organize_the_desk_stage1--chkpt.log 2>&1 &
+```
+**评估 vla-adapter-teleavatar-stage3**
+```bash
+startros2 && rosdomain && export CUDA_VISIBLE_DEVICES=1 && cd /home/nas/VLA-Adapter && python experiments/robot/teleavatar/run_teleavatar_stage_parallel_load_eval.py \
+  --pretrained_checkpoint outputs/adapter_stage_3--20000_chkpt \
+  > eval_logs/shihaoran--teleavatar--organize_the_desk_stage3--chkpt.log 2>&1 &
+```
+**评估 vla-adapter-teleavatar-stage4-20000**
+```bash
+startros2 && rosdomain && export CUDA_VISIBLE_DEVICES=1 && cd /home/nas/VLA-Adapter && python experiments/robot/teleavatar/run_teleavatar_stage_parallel_load_eval.py \
+  --pretrained_checkpoint outputs/adapter_stage_4--20000_chkpt \
+  > eval_logs/shihaoran--teleavatar--organize_the_desk_stage4--chkpt.log 2>&1 &
+```
+**评估 vla-adapter-teleavatar-stage4-30000**
+```bash
+startros2 && rosdomain && export CUDA_VISIBLE_DEVICES=1 && cd /home/nas/VLA-Adapter && python experiments/robot/teleavatar/run_teleavatar_stage_parallel_load_eval.py \
+  --pretrained_checkpoint outputs/adapter_stage_4--30000_chkpt \
+  > eval_logs/shihaoran--teleavatar--organize_the_desk_stage4_--chkpt.log 2>&1 &
+```
+**评估 vla-adapter-teleavatar-stage5**
+```bash
+startros2 && rosdomain && export CUDA_VISIBLE_DEVICES=1 && cd /home/nas/VLA-Adapter && python experiments/robot/teleavatar/run_teleavatar_stage_parallel_load_eval.py \
+  --pretrained_checkpoint outputs/adapter_stage_5--20000_chkpt \
+  > eval_logs/shihaoran--teleavatar--organize_the_desk_stage5--chkpt.log 2>&1 &
+```
+**评估 vla-adapter-teleavatar-stage6**
+```bash
+startros2 && rosdomain && export CUDA_VISIBLE_DEVICES=1 && cd /home/nas/VLA-Adapter && python experiments/robot/teleavatar/run_teleavatar_stage_parallel_load_eval.py \
+  --pretrained_checkpoint outputs/adapter_stage_6--20000_chkpt \
+  > eval_logs/shihaoran--teleavatar--organize_the_desk_stage6--chkpt.log 2>&1 &
+```
+**评估 vla-adapter-teleavatar-stage7-20000**
+```bash
+startros2 && rosdomain && export CUDA_VISIBLE_DEVICES=1 && cd /home/nas/VLA-Adapter && python experiments/robot/teleavatar/run_teleavatar_stage_parallel_load_eval.py \
+  --pretrained_checkpoint outputs/adapter_stage_7--20000_chkpt \
+  > eval_logs/shihaoran--teleavatar--organize_the_desk_stage7--chkpt.log 2>&1 &
+```
+**评估 vla-adapter-teleavatar-stage7-60000**
+```bash
+startros2 && rosdomain && export CUDA_VISIBLE_DEVICES=1 && cd /home/nas/VLA-Adapter && python experiments/robot/teleavatar/run_teleavatar_stage_parallel_load_eval.py \
+  --pretrained_checkpoint outputs/adapter_stage_7--60000_chkpt \
+  > eval_logs/shihaoran--teleavatar--organize_the_desk_stage7--chkpt.log 2>&1 &
+```
+**评估 vla-adapter-teleavatar-stage8-30000**
+```bash
+startros2 && rosdomain && export CUDA_VISIBLE_DEVICES=1 && cd /home/nas/VLA-Adapter && python experiments/robot/teleavatar/run_teleavatar_stage_parallel_load_eval.py \
+  --pretrained_checkpoint outputs/adapter_stage_8--30000_chkpt \
+  > eval_logs/shihaoran--teleavatar--organize_the_desk_stage8--chkpt.log 2>&1 &
+```
 
 If you want to get the inference **throughput**, you can run it in the `run_libero_eval.py` file. You can add  `start = time.time()` and `end = time.time()` before and after `lines 334--345` and calculate the difference between the two. This difference is the time it takes to generate `8 chunks`. This gives you the inference throughput. We measured it multiple times and took the average value of `0.036s`.
 
 <br/>
+
+```bash
+pkill -9 -f "run_teleavatar_stage_parallel_load_eval.py"
+```
 
 ## 🌈 Success Rate Comparison <a name="results"></a>
 
