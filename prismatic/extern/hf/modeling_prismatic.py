@@ -489,10 +489,16 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
             return torch.cat((projected_patch_embeddings, proprio_features), dim=1)
         return projected_patch_embeddings
 
-    def _insert_stage_queries(self, input_embeddings, attention_mask, labels):
+    def _insert_stage_queries(self, input_embeddings, attention_mask, labels, hl_token_count=None):
         """
-        Insert stage query embeddings before the first action token.
-        The attention mask simply ensures that neither stage nor action is treated as padding.
+        Insert stage query embeddings into the input sequence.
+
+        Two modes controlled by ``hl_token_count``:
+        - None  (default): insert before the first action token.
+            Result: [prompt, stage_queries, action_queries, stop]
+        - int: insert after the first (1 + hl_token_count) tokens, i.e. between the
+            high-level and low-level task prompts.
+            Result: [hl_prompt, stage_queries, ll_prompt, action_queries, stop]
         """
         if labels is None:
             return input_embeddings, attention_mask
@@ -501,13 +507,17 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
         if not torch.any(all_actions_mask):
             return input_embeddings, attention_mask
 
-        action_start_idx = torch.where(all_actions_mask[0])[0][0].item()
+        if hl_token_count is not None:
+            insert_idx = 1 + hl_token_count  # after start/BOS token + HL tokens
+        else:
+            insert_idx = torch.where(all_actions_mask[0])[0][0].item()  # before first action token
+
         stage_queries = self.stage_queries.weight.unsqueeze(0).expand(input_embeddings.shape[0], -1, -1)
         input_embeddings = torch.cat(
             [
-                input_embeddings[:, :action_start_idx, :],
+                input_embeddings[:, :insert_idx, :],
                 stage_queries,
-                input_embeddings[:, action_start_idx:, :],
+                input_embeddings[:, insert_idx:, :],
             ],
             dim=1,
         )
@@ -521,9 +531,9 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
             )
             attention_mask = torch.cat(
                 [
-                    attention_mask[:, :action_start_idx],
+                    attention_mask[:, :insert_idx],
                     stage_attention_mask,
-                    attention_mask[:, action_start_idx:],
+                    attention_mask[:, insert_idx:],
                 ],
                 dim=1,
             )
@@ -881,6 +891,7 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
         proprio=None,
         proprio_projector=None,
         input_ids=None,
+        hl_token_count: Optional[int] = None,
     ):
         """Run L1 regression-based continuous action prediction or discrete action tokens prediction."""
 
@@ -888,10 +899,15 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
         action_queries = action_queries.view(1, action_queries.shape[0], action_queries.shape[1]).repeat(input_embeddings.shape[0], 1, 1)  # (b, chunk_size, h)
         # Replace action token embeddings with noisy action embeddings
         input_embeddings = self._replace_input_embeddings(input_embeddings.clone(), all_actions_mask, action_queries)
-        if input_ids is not None:
+        # Training uses STAGE_PLACEHOLDER_ID in input_ids; inference prompts usually omit placeholders and
+        # rely on _insert_stage_queries (optionally with hl_token_count for HL/LL split).
+        use_stage_placeholders = input_ids is not None and torch.any(input_ids == STAGE_PLACEHOLDER_ID)
+        if use_stage_placeholders:
             input_embeddings = self._replace_stage_embeddings(input_embeddings, input_ids)
         else:
-            input_embeddings, attention_mask = self._insert_stage_queries(input_embeddings, attention_mask, labels)
+            input_embeddings, attention_mask = self._insert_stage_queries(
+                input_embeddings, attention_mask, labels, hl_token_count=hl_token_count
+            )
 
         # Build multimodal embeddings and attention mask
         multimodal_embeddings, multimodal_attention_mask = self._build_multimodal_attention(
@@ -967,6 +983,7 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
         action_head=None,
         noisy_action_projector=None,
         use_film: bool = False,
+        hl_token_count: Optional[int] = None,
         **kwargs: str,
     ) -> np.ndarray:
         """Predict actions from input sequence, with options for different prediction methods.
@@ -979,6 +996,8 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
             action_head: Optional head for L1 regression or diffusion-based prediction
             noisy_action_projector: Projector for noisy actions in diffusion-based prediction
             use_film: Whether to use FiLM conditioning
+            hl_token_count: When not None, insert stage queries after this many HL prompt tokens
+                (between high-level and low-level task prompts) instead of before action tokens.
             **kwargs: Additional arguments including pixel_values and attention_mask
 
         Returns:
@@ -1034,12 +1053,13 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
             proprio=proprio, # [14: left-arm-7, right-arm-7]
             proprio_projector=proprio_projector,
             input_ids=input_ids,
+            hl_token_count=hl_token_count,
             )
            
         # Unnormalize predicted actions
         actions = self._unnormalize_actions(normalized_actions, unnorm_key)
 
-        return actions, actions_hidden_states
+        return actions, actions_hidden_states, NUM_PATCHES, NUM_PROMPT_TOKENS
 
 
 

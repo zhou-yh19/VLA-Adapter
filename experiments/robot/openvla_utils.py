@@ -14,6 +14,7 @@ import numpy as np
 import requests
 import tensorflow as tf
 import torch
+import torch.nn.functional as F
 from huggingface_hub import HfApi, hf_hub_download
 from PIL import Image
 from transformers import AutoConfig, AutoImageProcessor, AutoModelForVision2Seq, AutoProcessor
@@ -30,6 +31,8 @@ from prismatic.models.projectors import NoisyActionProjector, ProprioProjector
 from prismatic.vla.constants import (
     ACTION_DIM,
     ACTION_PROPRIO_NORMALIZATION_TYPE,
+    NUM_TOKENS,
+    NUM_STAGES,
 )
 from prismatic.vla.datasets.rlds.utils.data_utils import NormalizationType
 
@@ -228,6 +231,33 @@ def find_checkpoint_file(pretrained_checkpoint: str, file_pattern: str) -> str:
     return checkpoint_files[0]
 
 
+def find_checkpoint_file_optional(pretrained_checkpoint: str, file_pattern: str) -> Optional[str]:
+    """
+    Find a checkpoint file matching a pattern if it exists.
+
+    Args:
+        pretrained_checkpoint: Path to the checkpoint directory
+        file_pattern: String pattern to match in filenames
+
+    Returns:
+        Optional[str]: Path to the matching checkpoint file, or None if not found or not a directory
+    """
+    if not os.path.isdir(pretrained_checkpoint):
+        return None
+    checkpoint_files = []
+    for filename in os.listdir(pretrained_checkpoint):
+        if file_pattern in filename and "checkpoint" in filename:
+            full_path = os.path.join(pretrained_checkpoint, filename)
+            checkpoint_files.append(full_path)
+    if len(checkpoint_files) == 0:
+        return None
+    # Prefer "latest" if multiple (e.g. stage_classifier--latest_checkpoint.pt vs stage_classifier--20000_checkpoint.pt)
+    for p in checkpoint_files:
+        if "latest" in p:
+            return p
+    return checkpoint_files[0]
+
+
 def load_component_state_dict(checkpoint_path: str) -> Dict[str, torch.Tensor]:
     """
     Load a component's state dict from checkpoint and handle DDP prefix if present.
@@ -298,14 +328,15 @@ def get_vla(cfg: Any) -> torch.nn.Module:
         update_auto_map(cfg.pretrained_checkpoint)
         check_model_logic_mismatch(cfg.pretrained_checkpoint)
 
-    # Load the model
+    # Load the model (parallel loading 时必须 False，否则 meta tensor 会污染其他线程创建的模块)
+    low_cpu = getattr(cfg, "low_cpu_mem_usage", True)
     vla = AutoModelForVision2Seq.from_pretrained(
         cfg.pretrained_checkpoint,
         # attn_implementation="flash_attention_2",
         torch_dtype=torch.bfloat16,
         load_in_8bit=cfg.load_in_8bit,
         load_in_4bit=cfg.load_in_4bit,
-        low_cpu_mem_usage=True,  # 优化：使用低内存模式可以加快大模型加载速度
+        low_cpu_mem_usage=low_cpu,
         trust_remote_code=False,
     )
 
@@ -556,6 +587,48 @@ def get_action_head(cfg: Any, llm_dim: int) -> Union[L1RegressionActionHead]:
         action_head.load_state_dict(state_dict)
 
     return action_head
+
+
+def get_stage_classifier(cfg: Any, llm_dim: int):
+    """
+    Load stage classifier (vla-adapter-stage) from checkpoint if present.
+
+    The stage classifier is a small head that predicts stage from VLA stage tokens.
+    Used when the checkpoint was trained with stage classification (e.g. finetune_stage_server.py).
+
+    Auto-detects checkpoint format: StageClassifier_0 (W, w, b) vs StageClassifier_1 (fc1, fc2).
+
+    Args:
+        cfg: Configuration with pretrained_checkpoint path
+        llm_dim: LLM hidden dimension (e.g. 896)
+
+    Returns:
+        Stage classifier module on DEVICE in eval mode, or None if no stage_classifier checkpoint found
+    """
+    from experiments.robot.teleavatar.stage_classifier import StageClassifier_0, StageClassifier_1
+    from prismatic.vla.constants import NUM_STAGE_CLASSES
+
+    checkpoint_path = find_checkpoint_file_optional(cfg.pretrained_checkpoint, "stage_classifier")
+    if checkpoint_path is None:
+        return None
+
+    state_dict = load_component_state_dict(checkpoint_path)
+    # Detect architecture: old checkpoints use (W, w, b), new use (fc1, fc2)
+    if "W" in state_dict and "w" in state_dict and "b" in state_dict:
+        stage_classifier = StageClassifier_0(
+            llm_dim=llm_dim,
+            num_stage_classes=NUM_STAGE_CLASSES,
+        ).to(DEVICE)
+    else:
+        stage_classifier = StageClassifier_1(
+            llm_dim=llm_dim,
+            num_stage_classes=NUM_STAGE_CLASSES,
+            hidden_dim=128,
+            dropout_rate=0.5,
+        ).to(DEVICE)
+    stage_classifier.load_state_dict(state_dict, strict=True)
+    stage_classifier.eval()
+    return stage_classifier
 
 
 def resize_image_for_policy(img: np.ndarray, resize_size: Union[int, Tuple[int, int]]) -> np.ndarray:
@@ -825,10 +898,10 @@ def get_vla_action(
         # Generate action
         if action_head is None:
             # Standard VLA output (single-image inputs, discrete actions)
-            action, _ = vla.predict_action(**inputs, unnorm_key=cfg.unnorm_key, do_sample=False)
+            action, _, num_patches, num_prompt_tokens = vla.predict_action(**inputs, unnorm_key=cfg.unnorm_key, do_sample=False)
         else:
             # Custom action head for continuous actions
-            action, _ = vla.predict_action(
+            action, _, num_patches, num_prompt_tokens = vla.predict_action(
                 **inputs,
                 unnorm_key=cfg.unnorm_key,
                 do_sample=False,
@@ -841,6 +914,190 @@ def get_vla_action(
 
     # Extract subset of actions for open loop steps
     return [action[i] for i in range(min(len(action), cfg.num_open_loop_steps))]
+
+
+def get_vla_stage_action(
+    cfg: Any,
+    vla: torch.nn.Module,
+    processor: Any,
+    obs: Dict[str, Any],
+    high_level_task: str,
+    low_level_task: str,
+    action_head: Optional[torch.nn.Module] = None,
+    proprio_projector: Optional[torch.nn.Module] = None,
+    noisy_action_projector: Optional[torch.nn.Module] = None,
+    use_film: bool = False,
+    use_minivlm: bool = False,
+    stage_classifier: Optional[torch.nn.Module] = None,
+) -> Tuple[List[np.ndarray], Optional[int]]:
+    """
+    Generate action predictions and current stage id (0/1/2/3) with the VLA policy.
+
+    When stage_classifier is not None, uses a forward hook on the VLA language model to
+    capture the last-layer hidden states at stage token positions, then runs the stage
+    classifier and returns argmax(logits) as the current stage id. Does not modify
+    modeling_prismatic.
+
+    Args:
+        cfg: Configuration object with parameters
+        vla: The VLA model
+        processor: Model processor for inputs
+        obs: Observation dictionary
+        task_label: Text description of the task
+        action_head: Optional action head for continuous actions
+        proprio_projector: Optional proprioception projector
+        noisy_action_projector: Optional noisy action projector for diffusion
+        use_film: Whether to use FiLM
+        stage_classifier: Optional stage classifier (StageClassifier_1). If provided,
+            current stage id is computed and returned.
+
+    Returns:
+        Tuple of (list of predicted actions, stage_id or None).
+        stage_id is in {0, 1, 2, 3} when stage_classifier is used, else None.
+    """
+    captured: Dict[str, Optional[torch.Tensor]] = {"hidden_states": None}
+
+    def _capture_last_hidden(module: torch.nn.Module, input: Any, output: Any) -> None:
+        if hasattr(output, "hidden_states") and output.hidden_states is not None:
+            captured["hidden_states"] = output.hidden_states[-1]
+
+    hook_handle = None
+    if stage_classifier is not None:
+        hook_handle = vla.language_model.register_forward_hook(_capture_last_hidden)
+
+    with torch.inference_mode():
+        # Collect all input images
+        all_images = [obs["full_image"]]
+        if cfg.num_images_in_input > 1:
+            all_images.extend([obs[k] for k in obs.keys() if "wrist" in k])
+
+        # Process images
+        all_images = prepare_images_for_vla(all_images, cfg)
+
+        # Extract primary image and additional images
+        primary_image = all_images.pop(0)
+        
+        # Build VLA prompt
+        hl_token_count = None
+        if not use_minivlm:
+            prompt = f"In: What action should the robot take to {high_level_task.lower()} {low_level_task.lower()}?\nOut:"
+        else:
+            high_level_task_prompt = (
+                f"<|im_start|>system\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant.<|im_end|>\n"
+                f"<|im_start|>user\nWhat action should the robot take to {high_level_task.lower()}?<|im_end|>\n"
+                f"<|im_start|>assistant\n"
+            )
+            low_level_task_prompt = f'{low_level_task.lower()}'
+            # prompt = f"{high_level_task_prompt}{low_level_task_prompt}<|im_end|>\n"
+            prompt = f"{high_level_task_prompt}{low_level_task_prompt}"
+
+            # 当 stage_insert_between_tasks 开启时，计算 HL prompt 的 token 数量，
+            # 用于在 HL 和 LL 之间插入 stage_queries
+            stage_insert_between_tasks = getattr(cfg, "stage_insert_between_tasks", False)
+            if stage_insert_between_tasks:
+                _tokenizer = getattr(processor, "tokenizer", None)
+                if _tokenizer is None:
+                    raise AttributeError("processor.tokenizer is required for stage_insert_between_tasks")
+                _hl_ids = _tokenizer(
+                    high_level_task_prompt, return_tensors="pt", add_special_tokens=False
+                )["input_ids"]
+                hl_token_count = int(_hl_ids.shape[-1])
+
+            # Calculate high_level_task tokens and low_level_task tokens. This is not commonly used
+            # 仅用于少量/临时的 token 统计测试：默认不执行，需要时把 if False 改成 if True。
+            # 目标：分别计算 high_level_task_prompt / low_level_task_prompt 在“转成 embedding 后”对应的 token 数。
+            if False:
+                tokenizer = getattr(processor, "tokenizer", None)
+                if tokenizer is None:
+                    raise AttributeError("processor.tokenizer is required for token counting")
+
+                hl_ids = tokenizer(
+                    high_level_task_prompt, return_tensors="pt", add_special_tokens=False
+                )["input_ids"]
+                ll_ids = tokenizer(
+                    low_level_task_prompt, return_tensors="pt", add_special_tokens=False
+                )["input_ids"]
+
+                hl_token_count = int(hl_ids.shape[-1])
+                ll_token_count = int(ll_ids.shape[-1])
+                # embedding数量与token数量一致
+                print(f"[language_token_count_debug] high_level_task_prompt: tokens={hl_token_count}")
+                print(f"[language_token_count_debug] low_level_task_prompt: tokens={ll_token_count}")
+
+        # Process primary image
+        inputs = processor(prompt, primary_image).to(DEVICE, dtype=torch.bfloat16)
+
+        # Process additional wrist images if any
+        if all_images:
+            all_wrist_inputs = [
+                processor(prompt, image_wrist).to(DEVICE, dtype=torch.bfloat16) for image_wrist in all_images
+            ]
+            primary_pixel_values = inputs["pixel_values"]
+            all_wrist_pixel_values = [wrist_inputs["pixel_values"] for wrist_inputs in all_wrist_inputs]
+            inputs["pixel_values"] = torch.cat([primary_pixel_values] + all_wrist_pixel_values, dim=1)
+
+        # Process proprioception data if used
+        proprio = None
+        if cfg.use_proprio:
+            proprio = obs["state"]
+            proprio_norm_stats = vla.norm_stats[cfg.unnorm_key]["proprio"]
+            obs["state"] = normalize_proprio(proprio, proprio_norm_stats)
+            proprio = obs["state"]
+                
+        # Generate action
+        if action_head is None:
+            # Standard VLA output (single-image inputs, discrete actions)
+            action, _, num_patches, num_prompt_tokens = vla.predict_action(
+                **inputs, unnorm_key=cfg.unnorm_key, do_sample=False,
+                hl_token_count=hl_token_count,
+            )
+        else:
+            # Custom action head for continuous actions
+            action, _, num_patches, num_prompt_tokens = vla.predict_action(
+                **inputs,
+                unnorm_key=cfg.unnorm_key,
+                do_sample=False,
+                proprio=proprio,
+                proprio_projector=proprio_projector,
+                noisy_action_projector=noisy_action_projector,
+                action_head=action_head,
+                use_film=use_film,
+                hl_token_count=hl_token_count,
+            )
+
+    if hook_handle is not None:
+        hook_handle.remove()
+
+    actions = [action[i] for i in range(min(len(action), cfg.num_open_loop_steps))]
+
+    if stage_classifier is not None and captured["hidden_states"] is not None:
+        last_layer = captured["hidden_states"]
+        if hl_token_count is not None:
+            # 新模式：stage_queries 在 HL 和 LL 之间，后面还有 LL tokens
+            # 序列末尾结构: ..., stage(8), ll_tokens(ll_full), action(64), stop(1)
+            ll_full_count = num_prompt_tokens - hl_token_count
+            tail_offset = NUM_TOKENS + 1 + ll_full_count
+            stage_hidden = last_layer[
+                :, -(tail_offset + NUM_STAGES) : -tail_offset, :
+            ]
+        else:
+            # 旧模式：stage_queries 紧贴在 action tokens 前面
+            stage_hidden = last_layer[
+                :, -(NUM_TOKENS + 1 + NUM_STAGES) : -(NUM_TOKENS + 1), :
+            ]
+        stage_logits = stage_classifier(stage_hidden.float())
+        
+        # 1. 归一化：在最后一个维度（dim=-1）上应用 Softmax，将其转换为概率分布
+        stage_probs = F.softmax(stage_logits, dim=-1)
+        
+        # 2. 降维并转换：
+        # - .squeeze() 会把形状从 [1, 1, 4] 压缩成 [4]
+        # - .detach().cpu().tolist() 将其安全地转换为 Python 的一维列表
+        stage_probs_ls = stage_probs.squeeze().detach().cpu().tolist()
+        
+        # stage_id = int(stage_logits.argmax(dim=-1).item())
+
+    return actions, stage_probs_ls, num_patches, num_prompt_tokens
 
 
 def get_action_from_server(

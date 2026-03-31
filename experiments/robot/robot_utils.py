@@ -3,7 +3,7 @@
 import os
 import random
 import time
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -11,6 +11,7 @@ import torch
 from experiments.robot.openvla_utils import (
     get_vla,
     get_vla_action,
+    get_vla_stage_action,
 )
 
 # Initialize important constants
@@ -107,7 +108,7 @@ def get_action(
     noisy_action_projector: Optional[torch.nn.Module] = None,
     use_film: bool = False,
     use_minivlm: bool = False,
-) -> Union[List[np.ndarray], np.ndarray]:
+) -> Union[List[np.ndarray], Tuple[List[np.ndarray], Optional[int]]]:
     """
     Query the model to get action predictions.
 
@@ -121,9 +122,12 @@ def get_action(
         proprio_projector: Optional proprioception projector
         noisy_action_projector: Optional noisy action projector for diffusion
         use_film: Whether to use FiLM
+        use_stage: If True and stage_classifier is provided, also compute and return current stage id (0/1/2/3).
+        stage_classifier: Optional stage classifier (e.g. vla-adapter-stage). Required when use_stage=True.
 
     Returns:
-        Union[List[np.ndarray], np.ndarray]: Predicted actions
+        If use_stage=True: (actions, stage_id) with stage_id in {0,1,2,3} or None if stage_classifier is None.
+        Otherwise: predicted actions only (list of np.ndarray).
 
     Raises:
         ValueError: If model family is not supported
@@ -140,12 +144,69 @@ def get_action(
                 proprio_projector=proprio_projector,
                 noisy_action_projector=noisy_action_projector,
                 use_film=use_film,
-                use_minivlm=use_minivlm
+                use_minivlm=use_minivlm,
             )
-        else:
-            raise ValueError(f"Unsupported model family: {cfg.model_family}")
+            return action
+        raise ValueError(f"Unsupported model family: {cfg.model_family}")
 
-    return action
+
+
+def get_stage_action(
+    cfg: Any,
+    model: torch.nn.Module,
+    obs: Dict[str, Any],
+    high_level_task: str,
+    low_level_task: str,
+    processor: Optional[Any] = None,
+    action_head: Optional[torch.nn.Module] = None,
+    proprio_projector: Optional[torch.nn.Module] = None,
+    noisy_action_projector: Optional[torch.nn.Module] = None,
+    use_film: bool = False,
+    use_minivlm: bool = False,
+    stage_classifier: Optional[torch.nn.Module] = None,
+) -> Union[List[np.ndarray], Tuple[List[np.ndarray], Optional[int]]]:
+    """
+    Query the model to get action predictions.
+
+    Args:
+        cfg: Configuration object with model parameters
+        model: The loaded model
+        obs: Observation dictionary
+        task_label: Text description of the task
+        processor: Model processor for inputs
+        action_head: Optional action head for continuous actions
+        proprio_projector: Optional proprioception projector
+        noisy_action_projector: Optional noisy action projector for diffusion
+        use_film: Whether to use FiLM
+        use_stage: If True and stage_classifier is provided, also compute and return current stage id (0/1/2/3).
+        stage_classifier: Optional stage classifier (e.g. vla-adapter-stage). Required when use_stage=True.
+
+    Returns:
+        If use_stage=True: (actions, stage_id) with stage_id in {0,1,2,3} or None if stage_classifier is None.
+        Otherwise: predicted actions only (list of np.ndarray).
+
+    Raises:
+        ValueError: If model family is not supported
+    """
+    with torch.no_grad():
+        if cfg.model_family == "openvla" and stage_classifier is not None:
+            actions, stage_probs, num_patches, num_prompt_tokens = get_vla_stage_action(
+                cfg=cfg,
+                vla=model,
+                processor=processor,
+                obs=obs,
+                high_level_task=high_level_task,
+                low_level_task=low_level_task,
+                action_head=action_head,
+                proprio_projector=proprio_projector,
+                noisy_action_projector=noisy_action_projector,
+                use_film=use_film,
+                use_minivlm=use_minivlm,
+                stage_classifier=stage_classifier,
+            )
+            return actions, stage_probs, num_patches, num_prompt_tokens
+        raise ValueError(f"Unsupported model family: {cfg.model_family}")
+
 
 
 def normalize_gripper_action(action: np.ndarray, binarize: bool = True) -> np.ndarray:
