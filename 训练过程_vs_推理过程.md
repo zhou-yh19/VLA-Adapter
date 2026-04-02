@@ -62,3 +62,11 @@
 | `vla-scripts/finetune_stage_server.py` | `AutoModelForVision2Seq.register`；`from_config` / `from_pretrained`；`run_forward_pass` 中 `vla(...)` |
 | `experiments/robot/openvla_utils.py` | `get_vla` 中 `from_pretrained`；推理中 `predict_action` |
 | `prismatic/extern/hf/modeling_prismatic.py` | `PrismaticForConditionalGeneration.forward`；`OpenVLAForActionPrediction` 与 `predict_action` |
+
+---
+
+## 6. 路径区别的根本原因
+
+**出现路径区别的最重要原因**：
+- 训练过程，是按照模块进行加载的，每个模块都需要执行前向计算。
+- 推理过程，所有的模块是一起进行加载的，这样就可以使用一个函数来实现整个流程。
