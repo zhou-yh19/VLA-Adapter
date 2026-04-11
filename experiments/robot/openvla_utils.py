@@ -328,7 +328,7 @@ def get_vla(cfg: Any) -> torch.nn.Module:
         update_auto_map(cfg.pretrained_checkpoint)
         check_model_logic_mismatch(cfg.pretrained_checkpoint)
 
-    # Load the model (parallel loading 时必须 False，否则 meta tensor 会污染其他线程创建的模块)
+    # Load the model (must be False for parallel loading, otherwise meta tensor will contaminate modules created in other threads)
     low_cpu = getattr(cfg, "low_cpu_mem_usage", True)
     vla = AutoModelForVision2Seq.from_pretrained(
         cfg.pretrained_checkpoint,
@@ -438,19 +438,19 @@ def get_processor(cfg: Any) -> AutoProcessor:
     Returns:
         AutoProcessor: The model's processor
     """
-    # 检测是否为本地路径：如果路径存在且是目录，则认为是本地路径
-    # 这样可以避免调用 HfApi 导致的延迟和潜在的网络问题
+    # Detect if it's a local path: if path exists and is a directory, treat as local path
+    # This avoids delays and potential network issues from calling HfApi
     is_local_path = os.path.isdir(cfg.pretrained_checkpoint) or os.path.exists(cfg.pretrained_checkpoint)
-    
-    # 如果看起来是本地路径，直接使用 trust_remote_code=True
-    # 否则尝试检测是否为 HF Hub 路径
+
+    # If it looks like a local path, use trust_remote_code=True directly
+    # Otherwise try to detect if it's an HF Hub path
     if is_local_path:
         trust_remote_code = True
     else:
-        # 尝试检测是否为 HF Hub 路径
+        # Try to detect if it's an HF Hub path
         trust_remote_code = not model_is_on_hf_hub(cfg.pretrained_checkpoint)
-    
-    # 如果是本地 checkpoint，先注册 Auto Classes（与 get_vla 保持一致）
+
+    # If it's a local checkpoint, register Auto Classes first (consistent with get_vla)
     if trust_remote_code:
         AutoConfig.register("openvla", OpenVLAConfig)
         AutoImageProcessor.register(OpenVLAConfig, PrismaticImageProcessor)
@@ -991,8 +991,8 @@ def get_vla_stage_action(
             # prompt = f"{high_level_task_prompt}{low_level_task_prompt}<|im_end|>\n"
             prompt = f"{high_level_task_prompt}{low_level_task_prompt}"
 
-            # 当 stage_insert_between_tasks 开启时，计算 HL prompt 的 token 数量，
-            # 用于在 HL 和 LL 之间插入 stage_queries
+            # When stage_insert_between_tasks is enabled, compute the token count of HL prompt,
+            # used for inserting stage_queries between HL and LL
             stage_insert_between_tasks = getattr(cfg, "stage_insert_between_tasks", False)
             if stage_insert_between_tasks:
                 _tokenizer = getattr(processor, "tokenizer", None)
@@ -1004,8 +1004,8 @@ def get_vla_stage_action(
                 hl_token_count = int(_hl_ids.shape[-1])
 
             # Calculate high_level_task tokens and low_level_task tokens. This is not commonly used
-            # 仅用于少量/临时的 token 统计测试：默认不执行，需要时把 if False 改成 if True。
-            # 目标：分别计算 high_level_task_prompt / low_level_task_prompt 在“转成 embedding 后”对应的 token 数。
+            # Only for small/temporary token counting tests: default is not executed, change if False to if True when needed.
+            # Goal: compute the token count corresponding to high_level_task_prompt / low_level_task_prompt after converting to embedding.
             if False:
                 tokenizer = getattr(processor, "tokenizer", None)
                 if tokenizer is None:
@@ -1020,7 +1020,7 @@ def get_vla_stage_action(
 
                 hl_token_count = int(hl_ids.shape[-1])
                 ll_token_count = int(ll_ids.shape[-1])
-                # embedding数量与token数量一致
+                # Number of embeddings matches number of tokens
                 print(f"[language_token_count_debug] high_level_task_prompt: tokens={hl_token_count}")
                 print(f"[language_token_count_debug] low_level_task_prompt: tokens={ll_token_count}")
 
@@ -1073,26 +1073,24 @@ def get_vla_stage_action(
     if stage_classifier is not None and captured["hidden_states"] is not None:
         last_layer = captured["hidden_states"]
         if hl_token_count is not None:
-            # 新模式：stage_queries 在 HL 和 LL 之间，后面还有 LL tokens
-            # 序列末尾结构: ..., stage(8), ll_tokens(ll_full), action(64), stop(1)
+            # New mode: stage_queries between HL and LL, with LL tokens after
+            # End of sequence structure: ..., stage(8), ll_tokens(ll_full), action(64), stop(1)
             ll_full_count = num_prompt_tokens - hl_token_count
             tail_offset = NUM_TOKENS + 1 + ll_full_count
             stage_hidden = last_layer[
                 :, -(tail_offset + NUM_STAGES) : -tail_offset, :
             ]
         else:
-            # 旧模式：stage_queries 紧贴在 action tokens 前面
-            stage_hidden = last_layer[
-                :, -(NUM_TOKENS + 1 + NUM_STAGES) : -(NUM_TOKENS + 1), :
-            ]
+            # Old mode: stage_queries right before action tokens
+            stage_hidden = last_layer[:, -(NUM_TOKENS + 1 + NUM_STAGES) : -(NUM_TOKENS + 1), :]
         stage_logits = stage_classifier(stage_hidden.float())
-        
-        # 1. 归一化：在最后一个维度（dim=-1）上应用 Softmax，将其转换为概率分布
+
+        # 1. Normalization: apply Softmax on the last dimension (dim=-1) to convert to probability distribution
         stage_probs = F.softmax(stage_logits, dim=-1)
-        
-        # 2. 降维并转换：
-        # - .squeeze() 会把形状从 [1, 1, 4] 压缩成 [4]
-        # - .detach().cpu().tolist() 将其安全地转换为 Python 的一维列表
+
+        # 2. Reduce dimensions and convert:
+        # - .squeeze() compresses shape from [1, 1, 4] to [4]
+        # - .detach().cpu().tolist() safely converts to a Python 1D list
         stage_probs_ls = stage_probs.squeeze().detach().cpu().tolist()
         
         # stage_id = int(stage_logits.argmax(dim=-1).item())

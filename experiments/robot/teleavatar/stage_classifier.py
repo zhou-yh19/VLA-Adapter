@@ -36,42 +36,42 @@ class StageClassifier_1(nn.Module):
         num_stage_classes: int = 4, dropout_rate: float = 0.5
         ):
         super().__init__()
-        
-        # 1. 第一层线性网络（特征压缩/瓶颈层）
-        # 将 896 维的高维特征压缩提炼为 hidden_dim 维的核心特征
+
+        # 1. First linear layer (feature compression/bottleneck layer)
+        # Compresses high-dimensional features from llm_dim to hidden_dim
         self.fc1 = nn.Linear(llm_dim, hidden_dim)
-        
-        # 2. 非线性激活函数
-        # 推荐使用 GELU (LLM 领域最常用) 或 ReLU，赋予模型非线性表达能力
-        self.activation = nn.GELU() 
-        
-        # 3. Dropout 层（非常关键！）
-        # 放在非线性激活之后，第二层线性网络之前，打断死记硬背的神经元连接
+
+        # 2. Non-linear activation function
+        # Using GELU (most common in LLMs) or ReLU to give the model non-linear expressive power
+        self.activation = nn.GELU()
+
+        # 3. Dropout layer (very important!)
+        # Placed after non-linear activation and before second linear layer to prevent overfitting
         self.dropout = nn.Dropout(p=dropout_rate)
-        
-        # 4. 第二层线性网络（最终分类输出层）
-        # 从隐藏层维度映射到 4 个类别
+
+        # 4. Second linear layer (final classification output layer)
+        # Maps from hidden dimension to num_stage_classes categories
         self.fc2 = nn.Linear(hidden_dim, num_stage_classes)
 
     def forward(self, stage: torch.Tensor) -> torch.Tensor:
-        # 输入维度: (B, 8, llm_dim)
-        
-        # 第一步：序列维度求平均 (Mean Pooling) -> 破除位置依赖
-        # 维度: (B, 8, llm_dim) -> (B, llm_dim)
-        x = torch.mean(stage, dim=1) 
-        
-        # 第二步：第一层线性映射 (提炼特征)
-        # 维度: (B, llm_dim) -> (B, hidden_dim)
+        # Input shape: (B, 8, llm_dim)
+
+        # Step 1: Mean pooling over sequence dimension -> remove position dependency
+        # Shape: (B, 8, llm_dim) -> (B, llm_dim)
+        x = torch.mean(stage, dim=1)
+
+        # Step 2: First linear projection (feature extraction)
+        # Shape: (B, llm_dim) -> (B, hidden_dim)
         x = self.fc1(x)
-        
-        # 第三步：非线性激活 (增加表达能力)
+
+        # Step 3: Non-linear activation (add expressive power)
         x = self.activation(x)
-        
-        # 第四步：Dropout (强制泛化)
+
+        # Step 4: Dropout (enforce generalization)
         x = self.dropout(x)
-        
-        # 第五步：第二层线性映射 (输出结果)
-        # 维度: (B, hidden_dim) -> (B, num_stage_classes)
+
+        # Step 5: Second linear projection (output)
+        # Shape: (B, hidden_dim) -> (B, num_stage_classes)
         logits = self.fc2(x)
         
         return logits

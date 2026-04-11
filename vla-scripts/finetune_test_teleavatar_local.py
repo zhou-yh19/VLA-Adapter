@@ -129,21 +129,21 @@ class FinetuneConfig:
 
 
 def get_process_tree_memory():
-    """获取当前进程及所有子进程的内存使用"""
+    """Get memory usage of current process and all child processes"""
     current_process = psutil.Process(os.getpid())
-    
-    # 获取当前进程内存
+
+    # Get current process memory
     total_memory = current_process.memory_info().rss
-    
-    # 递归获取所有子进程的内存
+
+    # Recursively get memory of all child processes
     children = current_process.children(recursive=True)
     for child in children:
         try:
             total_memory += child.memory_info().rss
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             pass
-    
-    return total_memory / 1024**2  # 转换为MB
+
+    return total_memory / 1024**2  # Convert to MB
 
 
 def remove_ddp_in_checkpoint(state_dict) -> dict:

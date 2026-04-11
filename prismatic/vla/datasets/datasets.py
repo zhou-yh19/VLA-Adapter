@@ -38,9 +38,9 @@ from prismatic.vla.datasets.rlds.oxe import OXE_NAMED_MIXTURES, get_oxe_dataset_
 
 def extract_last_number(line: str) -> Optional[int]:
     """
-    从单行提示词提取最后一个数字。
-    - current task: Task4 → 4
-    - current task: None 且 completed tasks: task1, task2, task3 → 3
+    Extract the last number from a single-line prompt.
+    - current task: Task4 -> 4
+    - current task: None and completed tasks: task1, task2, task3 -> 3
     """
     m = re.search(r"current task:\s*(task(\d+)|None)\s*\.?\s*$", line.strip())
     if not m:
@@ -55,9 +55,9 @@ def extract_last_number(line: str) -> Optional[int]:
 
 def _parse_task_states(lang: str) -> Tuple[list, Optional[int]]:
     """
-    从 language_instruction 解析：已完成任务列表、当前任务编号。
-    - completed tasks: task1, task2 -> [1, 2]；completed tasks: None -> []
-    - current task: task3 -> 3；current task: None -> None
+    Parse completed task list and current task number from language_instruction.
+    - completed tasks: task1, task2 -> [1, 2]; completed tasks: None -> []
+    - current task: task3 -> 3; current task: None -> None
     """
     completed = []
     comp_match = re.search(
@@ -78,14 +78,14 @@ def _parse_task_states(lang: str) -> Tuple[list, Optional[int]]:
 
 def add_task_description_suffix(lang: str) -> str:
     """
-    将四个任务（task1~task4）标注成三种状态后返回，用作 prompt 的 language 部分：
-    - completed tasks 中的任务 -> done
+    Annotate four tasks (task1~task4) with three states and return as the language part of the prompt:
+    - tasks in completed tasks -> done
     - current task -> active
-    - 其余任务 -> waiting
-    若存在 "completed tasks" / "current task" 前的描述文本则保留为前缀。
+    - other tasks -> waiting
+    If there is descriptive text before "completed tasks" / "current task", keep it as prefix.
     """
     completed, current = _parse_task_states(lang)
-    # 提取前缀："completed tasks" 之前的内容（若有）
+    # Extract prefix: content before "completed tasks" (if any)
     prefix_match = re.search(r"^(.+?)\s*completed\s+tasks?", lang, flags=re.IGNORECASE | re.DOTALL)
     prefix = prefix_match.group(1).strip() if prefix_match and prefix_match.group(1).strip() else ""
 
@@ -142,8 +142,8 @@ class RLDSBatchTransform:
         lang = rlds_batch["task"]["language_instruction"].decode().lower()
         actions = rlds_batch["action"]
 
-        # 从 language_instruction 解析 stage：仅当解析结果为 1–4 时添加 stage 特征（非 RLDS 必须）
-        # CrossEntropy 要求类别下标为 0~num_classes-1，故存 0-indexed（0,1,2,3），不能存 1~4
+        # Parse stage from language_instruction: only add stage feature when parsing result is 1-4 (not required for RLDS)
+        # CrossEntropy requires class indices to be 0~num_classes-1, so store 0-indexed (0,1,2,3), not 1~4
         stage_raw = extract_last_number(lang)
         stage_class_index = (stage_raw - 1) if (stage_raw is not None and 1 <= stage_raw <= 4) else None
         
@@ -154,7 +154,8 @@ class RLDSBatchTransform:
             else:
                 lang_for_prompt = lang
         else:
-            # 做 stage 预测时：prompt 中不包含 "Current task"，只保留已完成任务，迫使模型依赖视觉+语言预测当前任务
+            # For stage prediction: prompt does not contain "Current task", only keep completed tasks,
+            # forcing the model to predict current task based on vision + language
             lang_for_prompt = add_task_description_suffix(lang) if stage_class_index is not None else lang
 
         # Construct Chat-based Prompt =>> Input is default query + language instruction, output are the action tokens
@@ -182,7 +183,7 @@ class RLDSBatchTransform:
             for turn in conversation:
                 prompt_builder.add_turn(turn["from"], turn["value"])
 
-            prompt = prompt_builder.get_prompt() #e.g. 'In: What action should the robot take to put both the cream cheese box and the butter in the basket?\nOut: 希</s>'
+            prompt = prompt_builder.get_prompt()  # e.g. 'In: What action should the robot take to put both the cream cheese box and the butter in the basket?\nOut: </s>'
             input_ids = self.base_tokenizer(prompt_builder.get_prompt(), add_special_tokens=True).input_ids
 
             if len(input_ids) >= 3:
@@ -222,7 +223,7 @@ class RLDSBatchTransform:
 
             for turn in conversation:
                 prompt_builder.add_turn(turn["from"], turn["value"])
-            prompt = prompt_builder.get_prompt() #e.g. 'In: What action should the robot take to put both the cream cheese box and the butter in the basket?\nOut: 希</s>'
+            prompt = prompt_builder.get_prompt()  # e.g. 'In: What action should the robot take to put both the cream cheese box and the butter in the basket?\nOut: </s>'
             # Tokenize (w/ `base_tokenizer`)
             input_ids = self.base_tokenizer(prompt, add_special_tokens=True).input_ids
             labels = list(input_ids)

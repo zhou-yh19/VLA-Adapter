@@ -827,9 +827,9 @@ def finetune(cfg: FinetuneConfig) -> None:
         vla.train()
         optimizer.zero_grad()
         for batch_idx, batch in enumerate(dataloader):
-            # Debug: 打印 batch 中的所有内容（仅首个 batch 打印一次）
+            # Debug: print all contents in batch (only for first batch)
             if batch_idx == 0 and distributed_state.is_main_process:
-                print("\n=== batch 内容 ===")
+                print("\n=== batch contents ===")
                 for k, v in batch.items():
                     if isinstance(v, torch.Tensor):
                         print(f"  {k}: Tensor shape={v.shape}, dtype={v.dtype}")

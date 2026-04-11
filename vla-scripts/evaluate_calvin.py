@@ -407,7 +407,7 @@ def rollout_hi3(env, model, task_oracle, subtask, val_annotations, debug, eval_d
     for step in range(80):
         action_buffers = [None, None, None]
 
-        action_buffers[0] = model.step(obs, lang_annotation, 0)  # 8个动作
+        action_buffers[0] = model.step(obs, lang_annotation, 0)  # 8 actions
         action = action_buffers[0][0]
         action = process_action(action, "openvla")
         obs, reward, done, current_info = env.step(action.tolist())

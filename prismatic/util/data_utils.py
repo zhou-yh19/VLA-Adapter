@@ -162,7 +162,7 @@ class PaddedCollatorForActionPrediction:
         else:
             proprio = None
 
-        # Stack stage 仅当本 batch 中所有样本都有 stage 时添加（stage 为可选特征，非 RLDS 必须；取值 1–4 对应类别 0–3）
+        # Stack stage only when all samples in the batch have stage (stage is optional, not required for RLDS; values 1-4 correspond to classes 0-3)
         stage = None
         if all("stage" in inst for inst in instances):
             stage = torch.stack([instance["stage"] for instance in instances])

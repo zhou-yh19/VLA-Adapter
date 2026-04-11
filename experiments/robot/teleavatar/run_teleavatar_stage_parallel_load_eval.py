@@ -18,8 +18,8 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import List, Optional, Union
-import queue  # 用于线程安全队列
-import threading  # 用于多线程
+import queue  # For thread-safe queue
+import threading  # For multi-threading
 
 import draccus
 import numpy as np
@@ -93,7 +93,7 @@ class GenerateConfig:
     num_episodes: int = 1                           # Number of episodes to run
     max_episode_steps: int = 1800                     # Maximum VLA inference count per episode 
                                                      # action_generation_frequency * one_episode_duration(30s)
-                                                     # max_episode_steps = 600时，相当于一个episode会运行1分钟
+                                                     # max_episode_steps = 600 means one episode runs for about 1 minute
 
     #################################################################################################################
     # Utils
@@ -108,7 +108,7 @@ class GenerateConfig:
     enable_stage_manager: bool = False                # If False, disable stage manager; low_level_task stays all-Waiting
     mean_voting_flag: bool = True                   # If True, use mean voting to update stage_progress, else use weighted voting
     stage_insert_between_tasks: bool = True          # If True, insert stage_queries between HL and LL prompts; else before action tokens
-                                                    # 只有 vla-adapter-stage4 之后的模型是这个架构
+                                                     # Only models after vla-adapter-stage4 use this architecture
 
     # fmt: on
     save_version: str = "vla-adapter-teleavatar-stage"     # version of 
@@ -142,66 +142,70 @@ def initialize_model(cfg: GenerateConfig, log_file):
     noisy_action_projector = None
     
     if cfg.use_parallel_loading:
-        # 完全并行加载：主模型、proprio_projector、action_head、processor、stage_classifier 同时加载
-        # 使用 ThreadPoolExecutor 实现并行加载
-        # 并行加载时必须关闭 low_cpu_mem_usage，否则主模型会使用 meta device 创建张量，
-        # 导致其他线程里创建的 action_head 等模块也变成 meta 张量，进而 .to(device) 报错
+        # Fully parallel loading: main model, proprio_projector, action_head, processor, stage_classifier loaded simultaneously
+        # Using ThreadPoolExecutor for parallel loading
+        # Must disable low_cpu_mem_usage for parallel loading, otherwise the main model will use meta device for tensors,
+        # causing action_head and other modules created in other threads to also become meta tensors, leading to .to(device) errors
         cfg.low_cpu_mem_usage = False
         max_workers = 1  # llm
         futures = {}
-        
-        # 计算需要的线程数
+
+        # Calculate the number of threads needed
         if cfg.model_family == "openvla":
             max_workers += 1  # processor
         if cfg.use_proprio:
             max_workers += 1  # proprio_projector
         if cfg.use_l1_regression:
             max_workers += 1  # action_head
-        max_workers += 1  # stage_classifier (vla-adapter-stage，若 checkpoint 中存在则加载)
-        
-        log_message(f"开始并行加载，使用 {max_workers} 个线程", log_file)
-        
+        max_workers += 1  # stage_classifier (vla-adapter-stage, loaded if exists in checkpoint)
+
+        log_message(f"Starting parallel loading with {max_workers} threads", log_file)
+
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            # 提交主模型加载任务
-            futures[executor.submit(get_model, cfg)] = 'model'
-            log_message("已提交 llm 加载任务", log_file)
-            
-            # 提交 processor 加载任务（如果使用 openvla）
+            # Submit main model loading task
+            futures[executor.submit(get_model, cfg)] = "model"
+            log_message("Submitted llm loading task", log_file)
+
+            # Submit processor loading task (if using openvla)
             processor = None
             if cfg.model_family == "openvla":
-                futures[executor.submit(get_processor, cfg)] = 'processor'
-                log_message("已提交 processor 加载任务", log_file)
-            
-            # 提交 proprio_projector 加载任务（如果启用）
+                futures[executor.submit(get_processor, cfg)] = "processor"
+                log_message("Submitted processor loading task", log_file)
+
+            # Submit proprio_projector loading task (if enabled)
             proprio_projector = None
             if cfg.use_proprio:
-                futures[executor.submit(
-                    get_proprio_projector,
-                    cfg,
-                    cfg.llm_dim,
-                    PROPRIO_DIM,  # 14-dimensional proprio for Teleavatar
-                )] = 'proprio'
-                log_message("已提交 proprio_projector 加载任务", log_file)
-            
-            # 提交 action_head 加载任务（如果启用）
+                futures[
+                    executor.submit(
+                        get_proprio_projector,
+                        cfg,
+                        cfg.llm_dim,
+                        PROPRIO_DIM,  # 14-dimensional proprio for Teleavatar
+                    )
+                ] = "proprio"
+                log_message("Submitted proprio_projector loading task", log_file)
+
+            # Submit action_head loading task (if enabled)
             action_head = None
             if cfg.use_l1_regression:
-                futures[executor.submit(
-                    get_action_head,
-                    cfg,
-                    cfg.llm_dim,
-                )] = 'action_head'
-                log_message("已提交 action_head 加载任务", log_file)
-            
-            # 提交 stage_classifier 加载任务（vla-adapter-stage，从 run_* 目录加载）
+                futures[
+                    executor.submit(
+                        get_action_head,
+                        cfg,
+                        cfg.llm_dim,
+                    )
+                ] = "action_head"
+                log_message("Submitted action_head loading task", log_file)
+
+            # Submit stage_classifier loading task (vla-adapter-stage, loaded from run_* directory)
             stage_classifier = None
-            futures[executor.submit(get_stage_classifier, cfg, cfg.llm_dim)] = 'stage_classifier'
-            log_message("已提交 stage_classifier 加载任务", log_file)
-            
-            # 等待所有任务完成并收集结果
+            futures[executor.submit(get_stage_classifier, cfg, cfg.llm_dim)] = "stage_classifier"
+            log_message("Submitted stage_classifier loading task", log_file)
+
+            # Wait for all tasks to complete and collect results
             completed_count = 0
-            model = None  # 初始化 model 变量
-            
+            model = None  # Initialize model variable
+
             for future in as_completed(futures):
                 component_type = futures[future]
                 try:
@@ -210,39 +214,45 @@ def initialize_model(cfg: GenerateConfig, log_file):
                     
                     if   component_type == 'model':
                         model = result
-                        # 主模型加载完成后，设置版本和检查 unnorm_key
+                        # After main model loading completes, set version and check unnorm_key
                         model.set_version(cfg.save_version)
                         if cfg.model_family == "openvla":
                             check_unnorm_key(cfg, model)
-                        log_message(f"主模型加载完成 ({completed_count}/{len(futures)})", log_file)
-                    elif component_type == 'processor':
+                        log_message(f"Main model loaded ({completed_count}/{len(futures)})", log_file)
+                    elif component_type == "processor":
                         processor = result
-                        log_message(f"processor 加载完成 ({completed_count}/{len(futures)})", log_file)
-                    elif component_type == 'proprio':
+                        log_message(f"processor loaded ({completed_count}/{len(futures)})", log_file)
+                    elif component_type == "proprio":
                         proprio_projector = result
-                        log_message(f"proprio_projector 加载完成 ({completed_count}/{len(futures)})", log_file)
-                    elif component_type == 'action_head':
+                        log_message(f"proprio_projector loaded ({completed_count}/{len(futures)})", log_file)
+                    elif component_type == "action_head":
                         action_head = result
-                        log_message(f"action_head 加载完成 ({completed_count}/{len(futures)})", log_file)
-                    elif component_type == 'stage_classifier':
+                        log_message(f"action_head loaded ({completed_count}/{len(futures)})", log_file)
+                    elif component_type == "stage_classifier":
                         stage_classifier = result
                         if stage_classifier is not None:
-                            log_message(f"stage_classifier (vla-adapter-stage) 加载完成 ({completed_count}/{len(futures)})", log_file)
+                            log_message(
+                                f"stage_classifier (vla-adapter-stage) loaded ({completed_count}/{len(futures)})",
+                                log_file,
+                            )
                         else:
-                            log_message(f"未找到 stage_classifier 权重，跳过 ({completed_count}/{len(futures)})", log_file)
+                            log_message(
+                                f"stage_classifier weights not found, skipping ({completed_count}/{len(futures)})",
+                                log_file,
+                            )
                 except Exception as e:
-                    log_message(f"加载 {component_type} 时出错: {e}", log_file)
+                    log_message(f"Error loading {component_type}: {e}", log_file)
                     raise
-            
-            # 验证主模型已成功加载
+
+            # Verify main model loaded successfully
             if model is None:
-                raise RuntimeError("主模型加载失败！")
-            
-            log_message(f"所有组件加载完成！共 {len(futures)} 个组件", log_file)
-        
+                raise RuntimeError("Main model loading failed!")
+
+            log_message(f"All components loaded! Total {len(futures)} components", log_file)
+
         return model, action_head, proprio_projector, noisy_action_projector, processor, stage_classifier
     else:
-        # 串行加载（原始方式）
+        # Sequential loading (original way)
         # Load model
         model = get_model(cfg)
         model.set_version(cfg.save_version)
@@ -270,9 +280,9 @@ def initialize_model(cfg: GenerateConfig, log_file):
         # Load stage classifier (vla-adapter-stage) if checkpoint contains it
         stage_classifier = get_stage_classifier(cfg, cfg.llm_dim)
         if stage_classifier is not None:
-            log_message("stage_classifier (vla-adapter-stage) 加载完成", log_file)
+            log_message("stage_classifier (vla-adapter-stage) loaded", log_file)
         else:
-            log_message("未找到 stage_classifier 权重，跳过", log_file)
+            log_message("stage_classifier weights not found, skipping", log_file)
 
         return model, action_head, proprio_projector, noisy_action_projector, processor, stage_classifier
 
@@ -366,56 +376,86 @@ def update_stage_progress(
     mean_voting_flag: bool = False,
 ) -> dict:
     """
-    利用投票机制来更新 stage_progress
-    每个 Task 都会经历三个状态："Waiting", "Active", "Done"
-    同时有且只有一个 Task 处于 Active 状态
+    Use voting mechanism to update stage_progress
+    Each Task goes through three states: "Waiting", "Active", "Done"
+    Only one Task can be in Active state at any time
     """
-    # 加权投票
+    # Weighted voting
     if mean_voting_flag is not True:
         weighted_score = {1: 0.0, 2: 0.0, 3: 0.0, 4: 0.0}
         for idx, stage_id in enumerate(stage_id_arr):
             weighted_score[stage_id] += weights[idx]
 
-        # “有效阶段”为加权得分最高的 stage_id
+        # "Effective stage" is the stage_id with highest weighted score
         effective_stage = max(weighted_score, key=weighted_score.get)
         if stage_progress[effective_stage] == "Waiting":
-            # 当前任务需要开始处理，关闭其他正在处理的任务
+            # Current task needs to start processing, close other active tasks
             for stage_id, stage_state in stage_progress.items():
                 if stage_state == "Active":
                     stage_progress[stage_id] = "Done"
                     break
             stage_progress[effective_stage] = "Active"
         elif stage_progress[effective_stage] == "Active":
-            # 当前任务正在处理中，无需更新
+            # Current task is being processed, no update needed
             pass
         elif stage_progress[effective_stage] == "Done":
-            # 当前阶段已在之前完成，无需更新
+            # Current stage was already completed before, no update needed
             pass
         return stage_progress
-    
-    # 均值投票
+
+    # Mean voting
     else:
         weighted_score = {1: 0, 2: 0, 3: 0, 4: 0}
         for stage_id in stage_id_arr:
             weighted_score[stage_id] += 1
 
-        # 找到所有得分等于最高分的 stage_id
+        # Find all stage_ids with score equal to the highest score
         max_score = max(weighted_score.values())
         best_stage_ids = [stage_id for stage_id, score in weighted_score.items() if score == max_score]
 
-        # 先删除其中是Done的stage_id
+        # First remove stage_ids that are Done
         best_stage_ids = list(filter(lambda stage_id: stage_progress[stage_id] != "Done", best_stage_ids))
         if best_stage_ids == []:
             return stage_progress
 
-        # 然后判断其中是否有Active，如果有就不需要改变
+        # Then check if any is Active, if so no change needed
         for stage_id in best_stage_ids:
             if stage_progress[stage_id] == "Active":
                 return stage_progress
 
-        # 如果没有Active，此时其中的stage_id都是waiting，随机选择一个作为Active
+        # If no Active, all stage_ids are waiting, randomly choose one as Active
         effective_stage = random.choice(best_stage_ids)
-        # 当前任务需要开始处理，关闭其他正在处理的任务
+        # Current task needs to start processing, close other active tasks
+        for stage_id, stage_state in stage_progress.items():
+            if stage_state == "Active":
+                stage_progress[stage_id] = "Done"
+                break
+        stage_progress[effective_stage] = "Active"
+        return stage_progress
+
+    # Mean voting
+    else:
+        weighted_score = {1: 0, 2: 0, 3: 0, 4: 0}
+        for stage_id in stage_id_arr:
+            weighted_score[stage_id] += 1
+
+        # Find all stage_ids with score equal to the highest score
+        max_score = max(weighted_score.values())
+        best_stage_ids = [stage_id for stage_id, score in weighted_score.items() if score == max_score]
+
+        # First remove stage_ids that are Done
+        best_stage_ids = list(filter(lambda stage_id: stage_progress[stage_id] != "Done", best_stage_ids))
+        if best_stage_ids == []:
+            return stage_progress
+
+        # Then check if any is Active, if so no change needed
+        for stage_id in best_stage_ids:
+            if stage_progress[stage_id] == "Active":
+                return stage_progress
+
+        # If no Active, all stage_ids are waiting, randomly choose one as Active
+        effective_stage = random.choice(best_stage_ids)
+        # Current task needs to start processing, close other active tasks
         for stage_id, stage_state in stage_progress.items():
             if stage_state == "Active":
                 stage_progress[stage_id] = "Done"
@@ -438,28 +478,27 @@ def run_episode(
     stage_classifier=None,
 ):
     """Run a single episode in the environment with parallel action generation and publishing."""
-    # 里面存放多个action_queue，但只有前九个甚至更少能够参与到当前时刻的动作生成中
+    # Stores multiple action queues, but only the first nine or fewer participate in action generation at current time
     action_stage_queues = list()
-    # 记录一个episode中四个stage的进度
-    stage_progress = {1:"Waiting", 2:"Waiting", 3:"Waiting", 4:"Waiting"}
-    
-    # 控制线程的停止标志
+    # Records the progress of four stages in one episode
+    stage_progress = {1: "Waiting", 2: "Waiting", 3: "Waiting", 4: "Waiting"}
+
+    # Thread stop event flags
     stop_event = threading.Event()
     exception_occurred = threading.Event()
-    exception_info = [None]  # 用于存储异常信息
-    
-    # 创建同步屏障，确保两个线程同时开始（需要2个线程）
+    exception_info = [None]  # Used to store exception information
+
+    # Create synchronization barriers to ensure both threads start/stop simultaneously (requires 2 threads)
     start_barrier = threading.Barrier(2)
-    # 创建停止屏障，确保两个线程同时停止（需要2个线程）
     stop_barrier = threading.Barrier(2)
-    
-    # 动作生成频率：10Hz = 0.1秒间隔
-    action_generation_interval = 1.0 / cfg.action_generation_frequency  # 使用配置中的频率
-    # 动作发布频率：30Hz = 0.033秒间隔
+
+    # Action generation frequency: 10Hz = 0.1 second interval
+    action_generation_interval = 1.0 / cfg.action_generation_frequency  # Using configured frequency
+    # Action publishing frequency: 30Hz = 0.033 second interval
     action_publish_interval = 1.0 / cfg.control_frequency  # 30Hz
-    
-    inference_count = [0]  # 使用列表以便在线程间共享
-    publish_count = [0]    # 发布步数；日志前缀 [GEN]/[STAGE]/[PUB] 便于 grep 分别查看队列与阶段
+
+    inference_count = [0]  # Use list for sharing between threads
+    publish_count = [0]  # Publishing steps; log prefixes [GEN]/[STAGE]/[PUB] for easy grep filtering
 
     # stage_progress is shared between generation & publishing threads (stage_lock)
     stage_log_buffer = []
@@ -467,30 +506,32 @@ def run_episode(
     stage_lock = threading.Lock()
 
     def action_generation_thread():
-        """以10Hz频率生成动作并放入队列的线程"""
+        """Thread that generates actions at 10Hz and puts them into queue"""
         try:
-            start_barrier.wait() # 等待两个线程都准备好后同时开始
+            start_barrier.wait()  # Wait for both threads to be ready before starting together
 
-            # 生成线程只因为 stop_event 被设置而停止，由发布线程控制停止时机
-            # 安全检查：如果达到最大步数，记录警告但继续运行（由发布线程决定何时停止）
+            # Generation thread only stops when stop_event is set, controlled by publishing thread
+            # Safety check: if max steps reached, log warning but continue (publishing thread decides when to stop)
             print_generation_stop_flag = False
 
-            # 将子任务内容写入到提示词中
+            # Write subtask content into the prompt
             task_description = prepare_task_description(cfg)
 
             while not stop_event.is_set():
-                # 安全检查：如果达到最大步数，等待发布线程发出停止信号
+                # Safety check: if max steps reached, wait for stop signal from publishing thread
                 if inference_count[0] >= cfg.max_episode_steps:
                     if print_generation_stop_flag is False:
-                        log_message(f"警告: 已达到最大步数 {cfg.max_episode_steps}，但继续运行等待发布线程停止信号", log_file)
+                        log_message(
+                            f"Warning: reached max steps {cfg.max_episode_steps}, but continuing to wait for publishing thread stop signal", log_file
+                        )
                         print_generation_stop_flag = True
                     time.sleep(action_publish_interval)
                     continue
 
-                # 正常执行生成动作程序
+                # Normal action generation execution
                 generation_start_time = time.time()
 
-                # 将stage_progress转换为low_level_task
+                # Convert stage_progress to low_level_task
                 if cfg.enable_stage_manager:
                     with stage_lock:
                         low_level_task = ",".join(
@@ -498,12 +539,12 @@ def run_episode(
                         )
                 else:
                     low_level_task = "Task1:Waiting,Task2:Waiting,Task3:Waiting,Task4:Waiting"
-                
-                # 获取观察
+
+                # Get observation
                 obs = robot_interface.get_observation()
                 observation = prepare_observation(obs)
 
-                # 生成动作（若加载了 stage_classifier 则同时返回当前 stage id 0/1/2/3）
+                # Generate actions (also returns current stage id 0/1/2/3 if stage_classifier is loaded)
                 inference_start_time = time.time()
                 actions, stage_probs, num_patches, num_prompt_tokens = get_stage_action(
                     cfg,
@@ -521,16 +562,16 @@ def run_episode(
                 )
                 inference_end_time = time.time()
                 inference_time_ls.append(inference_end_time - inference_start_time)
-                
-                # 记录图片patch数量和prompt token数量
+
+                # Log image patch count and prompt token count
                 log_message(
-                    f"num_patches: {num_patches}, num_prompt_tokens: {num_prompt_tokens}", 
+                    f"num_patches: {num_patches}, num_prompt_tokens: {num_prompt_tokens}",
                     log_file,
                 )
-                
-                # 将 (action, stage_id) 序列放入动作队列中
+
+                # Put (action, stage_id) sequence into action queue
                 max_index, _ = max(enumerate(stage_probs), key=lambda x: x[1])
-                stage_id = max_index + 1  # 将 idx 转换为 stage_id 
+                stage_id = max_index + 1  # Convert idx to stage_id
                 action_stage_pairs = [(action, stage_id) for action in actions]
                 action_stage_queues.append(action_stage_pairs)
                 inference_count[0] += 1
@@ -551,8 +592,8 @@ def run_episode(
                         )
                         stage_log_buffer.clear()
                         stage_log_last_flush[0] = now
-                
-                # 控制生成频率：10Hz
+
+                # Control generation frequency: 10Hz
                 generation_end_time = time.time()
                 elapsed_interval = generation_end_time - generation_start_time
                 if action_generation_interval > elapsed_interval:
@@ -568,39 +609,39 @@ def run_episode(
                     )
                     stage_log_buffer.clear()
 
-            # 生成线程检测到 stop_event 后（由发布线程设置），等待同步停止
-            log_message("生成线程检测到停止标志，准备停止...", log_file)
-            stop_barrier.wait()  # 等待两个线程都准备好后同时停止
-                    
+            # Generation thread detects stop_event (set by publishing thread), wait for synchronized stop
+            log_message("Generation thread detected stop signal, preparing to stop...", log_file)
+            stop_barrier.wait()  # Wait for both threads to be ready before stopping together
+
         except Exception as e:
-            log_message(f"动作生成线程错误: {e}", log_file)
+            log_message(f"Action generation thread error: {e}", log_file)
             exception_info[0] = e
             exception_occurred.set()
             stop_event.set()
             try:
-                stop_barrier.wait(timeout=0.1)  # 尝试同步停止，但不要阻塞太久
+                stop_barrier.wait(timeout=0.1)  # Try to synchronize stop, but don't block too long
             except threading.BrokenBarrierError:
-                pass  # 如果另一个线程已经停止，忽略错误
-    
-    def action_publishing_thread():
-        """以 30Hz 频率从队列取出动作并发布的线程"""
-        try:
-            start_barrier.wait() # 等待两个线程都准备好后同时开始
+                pass  # If another thread has already stopped, ignore error
 
-            # 等待模型发出第一个动作
+    def action_publishing_thread():
+        """Thread that takes actions from queue and publishes at 30Hz"""
+        try:
+            start_barrier.wait()  # Wait for both threads to be ready before starting together
+
+            # Wait for model to generate first action
             while len(action_stage_queues) == 0:
                 time.sleep(action_publish_interval)
             
             while not stop_event.is_set():
                 publish_start_time = time.time()
-                
-                # 检测停止条件：action_stage_queues 为空且已经生成过动作
+
+                # Check stop condition: action_stage_queues is empty and actions have been generated
                 if len(action_stage_queues) == 0:
-                    log_message("发布线程检测到 action_stage_queues 为空，发出停止信号...", log_file)
-                    stop_event.set()  # 由 publisher 发出停止信号
+                    log_message("Publishing thread detected action_stage_queues is empty, sending stop signal...", log_file)
+                    stop_event.set()  # Stop signal sent by publisher
                     break
-                
-                # 从队列获取动作
+
+                # Get actions from queue
                 num_preds = len(action_stage_queues)
                 weights = np.exp(-cfg.act_m * np.arange(num_preds))
                 weights = weights / np.sum(weights)
@@ -612,11 +653,11 @@ def run_episode(
                     action += weights[i] * np.array(action_)
                     stage_id_arr[i] = stage_id_
 
-                # 移除已空的动作队列
+                # Remove empty action queues
                 while len(action_stage_queues) > 0 and len(action_stage_queues[0]) == 0:
                     action_stage_queues.pop(0)
-                
-                # 发布动作
+
+                # Publish action
                 action = action.tolist()
                 robot_interface.apply_action(action)
 
@@ -627,73 +668,72 @@ def run_episode(
 
                 publish_count[0] += 1
 
-                # 控制发布频率：30Hz
+                # Control publishing frequency: 30Hz
                 publish_end_time = time.time()
                 elapsed_interval = publish_end_time - publish_start_time
                 if action_publish_interval > elapsed_interval:
                     time.sleep(action_publish_interval - elapsed_interval)
-            
-            # 发布线程完成时，等待同步停止
-            log_message("发布线程准备停止，等待同步...", log_file)
-            stop_barrier.wait()  # 等待两个线程都准备好后同时停止
-                    
+
+            # When publishing thread completes, wait for synchronized stop
+            log_message("Publishing thread preparing to stop, waiting for synchronization...", log_file)
+            stop_barrier.wait()  # Wait for both threads to be ready before stopping together
+
         except Exception as e:
-            log_message(f"动作发布线程错误: {e}", log_file)
+            log_message(f"Action publishing thread error: {e}", log_file)
             exception_info[0] = e
             exception_occurred.set()
             stop_event.set()
             try:
-                stop_barrier.wait(timeout=0.1)  # 尝试同步停止，但不要阻塞太久
+                stop_barrier.wait(timeout=0.1)  # Try to synchronize stop, but don't block too long
             except threading.BrokenBarrierError:
-                pass  # 如果另一个线程已经停止，忽略错误
-    
-    # 启动两个线程
-    log_message("启动并行动作生成和发布线程...", log_file)
+                pass  # If another thread has already stopped, ignore error
+
+    # Start two threads
+    log_message("Starting parallel action generation and publishing threads...", log_file)
     generation_thread = threading.Thread(target=action_generation_thread, daemon=True)
     publishing_thread = threading.Thread(target=action_publishing_thread, daemon=True)
-    
+
     generation_thread.start()
     publishing_thread.start()
-    
+
     try:
-        # 等待两个线程完成
-        # 发布线程会在检测到 action_stage_queues 为空时设置 stop_event 并控制停止
-        # 两个线程会通过 stop_barrier 同步停止
-        # timeout 计算：生成阶段时间 + 发布剩余动作时间 + 缓冲
-        # 最坏情况：生成线程停止时队列中有 max_episode_steps 个动作序列
-        # 每个序列包含 num_action_horizon 个动作，需要以 control_frequency 发布
+        # Wait for both threads to complete
+        # Publishing thread will set stop_event when action_stage_queues is empty and control stopping
+        # Both threads will synchronize stop via stop_barrier
+        # timeout calculation: generation phase time + remaining action publishing time + buffer
+        # Worst case: when generation thread stops, queue has max_episode_steps action sequences
+        # Each sequence contains num_action_horizon actions, need to be published at control_frequency
         generation_timeout = (
-            cfg.max_episode_steps * action_generation_interval +  # 生成阶段时间
-            (cfg.max_episode_steps * cfg.num_action_horizon) / cfg.control_frequency +  # 发布剩余动作时间
-            1.0  # 缓冲时间
+            cfg.max_episode_steps * action_generation_interval  # Generation phase time
+            + (cfg.max_episode_steps * cfg.num_action_horizon) / cfg.control_frequency  # Remaining action publishing time
+            + 1.0  # Buffer time
         )
         generation_thread.join(timeout=generation_timeout)
         publishing_thread.join(timeout=generation_timeout)
         
         if publishing_thread.is_alive():
-            log_message("警告: 发布线程未在超时时间内停止，强制设置停止标志", log_file)
+            log_message("Warning: publishing thread did not stop within timeout, forcing stop signal", log_file)
             stop_event.set()
             publishing_thread.join(timeout=0.5)
-        
-        # 检查是否有异常
+
+        # Check for exceptions
         if exception_occurred.is_set():
-            raise exception_info[0] if exception_info[0] else Exception("未知异常")
-            
+            raise exception_info[0] if exception_info[0] else Exception("Unknown exception")
+
     except Exception as e:
-        log_message(f"Episode 错误: {e}", log_file)
-        stop_event.set()  # 确保线程停止
+        log_message(f"Episode error: {e}", log_file)
+        stop_event.set()  # Ensure threads stop
         raise
     finally:
-        # 确保线程已停止（无论 try 块是否成功）
-        # 如果线程在 try 块中已经完成，join() 会立即返回（不等待）
-        # 如果线程还在运行，给它们 0.5 秒时间完成清理
+        # Ensure threads have stopped (whether try block succeeded or not)
+        # If threads already completed in try block, join() returns immediately (no wait)
+        # If threads still running, give them 0.5 seconds to complete cleanup
         stop_event.set()
         if generation_thread.is_alive():
             generation_thread.join(timeout=0.5)
         if publishing_thread.is_alive():
             publishing_thread.join(timeout=0.5)
-        log_message("所有线程已停止", log_file)
-
+        log_message("All threads stopped", log_file)
 
 
 def run_eval_runtime(
